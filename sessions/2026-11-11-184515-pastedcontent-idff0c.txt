@@ -1,0 +1,1075 @@
+
+> <ide_opened_file>The user opened the file c:\OneDrive\OneDrive - California
+  State University, Sacramento\Desktop\Work\Volt\project_Company Leadership RAG
+  Agent\app.py in the IDE. This may or may not be related to the current
+  task.</ide_opened_file>
+
+> I'm building a Company Leadership RAG Agent for an AI Engineer take-home
+  assignment.
+
+  My Python virtual environment, .env, and .gitignore are already created.
+
+  I want to use Python, BeautifulSoup, SQLite, Google Gemini API, and
+  Streamlit.
+
+  Please help me build a minimal end-to-end system that:
+  1. Accepts a company website URL.
+  2. Finds the company's executives, VPs, and department heads from public
+  sources.
+  3. Stores leadership information and source URLs in SQLite.
+  4. Uses the Gemini API to answer questions based on the collected
+  information.
+  5. Provides a simple Streamlit chat interface.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Packages are already installed (bs4, google-genai, streamlit, requests,
+  dotenv). Let me check the google-genai API surface before writing code.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Let me see which Gemini models the key can access, so I pick a valid default.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The key works. Now writing the four modules.
+
+● Write(database.py)
+  ⎿  Wrote 139 lines to database.py
+       1 """SQLite storage for companies, leaders, and the source pages t
+         hey came from."""
+       2
+       3 import sqlite3
+       4 from contextlib import contextmanager
+       5 from datetime import datetime, timezone
+       6
+       7 DB_PATH = "leadership.db"
+       8
+       9 SCHEMA = """
+     … +130 lines (ctrl+o to expand)
+
+● Write(scraper.py)
+  ⎿  Wrote 217 lines to scraper.py
+       1 """Find and fetch public pages likely to list a company's leader
+         ship.
+       2
+       3 Sources:
+       4   1. The company's own website: leadership / team / about pages,
+          found by
+       5      scoring links on the homepage (and one level below) plus co
+         mmon paths.
+       6   2. Wikipedia: the company's article (infobox "Key people" + in
+         tro), accepted
+     … +211 lines (ctrl+o to expand)
+
+● Write(rag.py)
+  ⎿  Wrote 190 lines to rag.py
+       1 """Gemini-powered extraction (ingest) and question answering (re
+         trieve + generate)."""
+       2
+       3 import os
+       4 import re
+       5 from typing import Literal
+       6
+       7 from dotenv import load_dotenv
+       8 from google import genai
+       9 from google.genai import types
+     … +181 lines (ctrl+o to expand)
+
+● Write(app.py)
+  ⎿  Wrote 86 lines to app.py
+       1 """Streamlit UI: collect a company's leadership, then chat about
+          it."""
+       2
+       3 import pandas as pd
+       4 import streamlit as st
+       5
+       6 import database as db
+       7 import rag
+       8
+       9 st.set_page_config(page_title="Company Leadership RAG Agent", pa
+     … +78 lines (~3 KB) (ctrl+o to expand)
+
+● Now an end-to-end test from the command line against a real company site.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Gemini 2.5 Flash is retired for this key, so I'm switching the default to
+  gemini-3.8-flash, and I'm also fixing link discovery that strayed into
+  research pages and a company name parsed as "Home \ Anthropic". · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Update(scraper.py)
+  ⎿  Added 6 lines
+      38      "/management", "/executives",
+      39  ]
+      40  SKIP_EXT = re.compile(r"\.(pdf|jpe?g|png|gif|svg|zip|mp4|mp3|do
+          cx?|xlsx?)$", re.I)
+      41 +# Content-style sections that mention "team" etc. but rarely li
+         +st leadership.                                                 
+      42 +NEGATIVE_PATH = re.compile(                                    
+      43 +    r"/(blog|news|research|press|articles?|posts?|stories|insig
+         +hts|resources|careers?|"                                       
+      44 +    r"jobs|events?|webinars?|podcasts?|search|tags?|category|cu
+         +stomers?|case-stud\w*|"                                        
+      45 +    r"docs?|support|help|legal|privacy|terms|login|signup)(/|$)
+         +", re.I                                                        
+      46 +)                                                              
+      47  
+      48  # Used to skip pages that clearly mention no leadership roles (
+          saves LLM calls).
+      49  ROLE_PATTERN = re.compile(
+
+● Update(scraper.py)
+  ⎿  Added 7 lines, removed 3 lines
+      126      scores: dict[str, int] = {}
+      127      for a in soup.find_all("a", href=True):
+      128          url, _ = urldefrag(urljoin(page_url, a["href"]))
+      129 -        if bare_domain(url) != domain or SKIP_EXT.search(url):
+      129 +        parsed = urlparse(url)                                
+      130 +        if (bare_domain(url) != domain or parsed.query or SKIP
+          +_EXT.search(parsed.path)                                      
+      131 +                or NEGATIVE_PATH.search(parsed.path)):        
+      132              continue
+      131 -        haystack = (urlparse(url).path + " " + a.get_text(" ")
+          -).lower()                                                     
+      133 +        haystack = (parsed.path + " " + a.get_text(" ")).lower
+          +()                                                            
+      134          score = sum(w for kw, w in LINK_KEYWORDS.items() if kw
+            in haystack)
+      133 -        if score:                                             
+      135 +        depth = len([seg for seg in parsed.path.split("/") if 
+          +seg])                                                         
+      136 +        score -= 2 * max(0, depth - 2)  # leadership pages are
+          + usually shallow                                              
+      137 +        if score > 0:                                         
+      138              url = url.rstrip("/")
+      139              scores[url] = max(scores.get(url, 0), score)
+      140      return scores
+
+● Update(scraper.py)
+  ⎿  Added 1 line, removed 1 line
+      158      candidates = _score_links(home_html, base_final, domain)
+      159      for path in COMMON_PATHS:
+      160          u = urljoin(base_final, path).rstrip("/")
+      161 -        candidates.setdefault(u, 1)                           
+      161 +        candidates.setdefault(u, 3)                           
+      162  
+      163      pages = [Page(base_final, html_to_text(home_html))]
+      164      visited = {base_final.rstrip("/")}
+
+● Update(scraper.py)
+  ⎿  Added 10 lines, removed 3 lines
+      112  
+      113  def company_name_from_html(html: str, fallback_url: str) -> st
+           r:
+      114      soup = BeautifulSoup(html, "html.parser")
+      115 +    stem = bare_domain(fallback_url).split(".")[0]            
+      116      og = soup.find("meta", property="og:site_name")
+      117      if og and og.get("content"):
+      118          return og["content"].strip()
+      119      if soup.title and soup.title.string:
+      119 -        # "Acme Corp | Home" -> "Acme Corp"                   
+      120 -        return re.split(r"\s[|\-–—:]\s", soup.title.string.str
+          -ip())[0]                                                      
+      121 -    return bare_domain(fallback_url).split(".")[0].title()    
+      120 +        # "Home \ Acme" / "Acme Corp | Home" -> "Acme" / "Acme
+          + Corp"                                                        
+      121 +        parts = [p.strip() for p in re.split(r"\s[|\-–—:\\/·]\
+          +s", soup.title.string.strip())]                               
+      122 +        parts = [p for p in parts if p and p.lower() not in {"
+          +home", "homepage", "welcome"}]                                
+      123 +        for p in parts:  # prefer the segment that matches the
+          + domain                                                       
+      124 +            if stem.lower() in p.lower().replace(" ", ""):    
+      125 +                return p                                      
+      126 +        if parts:                                             
+      127 +            return parts[0]                                   
+      128 +    return stem.title()                                       
+      129  
+      130  
+      131  def _score_links(html: str, page_url: str, domain: str) -> dic
+           t[str, int]:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Found /company/leadership correctly this time; the Gemini extraction call is
+  slow. While it runs, I'll write requirements and README.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Write(README.md)
+  ⎿  Wrote 55 lines to README.md
+       1 # Company Leadership RAG Agent
+       2
+       3 Give it a company website URL. It finds the company's executives
+         , VPs, and department heads on public pages, stores them in SQLi
+         te with the URL each one came from, and lets you ask questions a
+         bout them in a Streamlit chat. Answers come from Gemini and use
+         only the stored data.
+       4
+       5 ## Quick start
+       6
+     … +49 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Stuck on a single Gemini call for several minutes. I'll stop it and diagnose
+  the call directly.
+
+● Stop Task
+  ⎿  cd "c:/OneDrive/OneDrive - California State University,
+     Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+     PYTHONIOENCODING=utf-8 .venv/Scrip… · stopped
+  Ran 1 shell command (ctrl+o to expand)
+
+● Root cause: gemini-3.8-flash is returning 503 (overloaded), and the SDK kept
+  retrying silently. I'll add a timeout, limited retries, and automatic fallback
+  to other models.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Update(rag.py)
+  ⎿  Added 24 lines, removed 2 lines
+      13  import scraper
+      14  
+      15  load_dotenv()
+      16 -MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")          
+      16 +MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")          
+      17 +# Tried in order if the primary model is overloaded (503) or ra
+         +te-limited (429).                                              
+      18 +FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-3.5-flash-lite",
+         + "gemini-3.1-flash-lite"]                                      
+      19  _client: genai.Client | None = None
+      20  
+      21  
+     ...
+      25          key = os.getenv("GEMINI_API_KEY")
+      26          if not key:
+      27              raise RuntimeError("GEMINI_API_KEY is not set. Add 
+          it to your .env file.")
+      26 -        _client = genai.Client(api_key=key)                    
+      28 +        # Bounded timeout/retries so an overloaded model fails 
+         +fast instead of hanging.                                       
+      29 +        _client = genai.Client(                                
+      30 +            api_key=key,                                       
+      31 +            http_options=types.HttpOptions(                    
+      32 +                timeout=60_000, retry_options=types.HttpRetryOp
+         +tions(attempts=2)                                              
+      33 +            ),                                                 
+      34 +        )                                                      
+      35      return _client
+      36  
+      37  
+      38 +def generate(contents, config: types.GenerateContentConfig):   
+      39 +    """generate_content with fallback to other models on transi
+         +ent errors."""                                                 
+      40 +    models = [MODEL] + [m for m in FALLBACK_MODELS if m != MODE
+         +L]                                                             
+      41 +    last_err = None                                            
+      42 +    for model in models:                                       
+      43 +        try:                                                   
+      44 +            return client().models.generate_content(model=model
+         +, contents=contents, config=config)                            
+      45 +        except genai.errors.APIError as e:                     
+      46 +            if e.code not in (404, 429, 500, 503, 504):        
+      47 +                raise                                          
+      48 +            last_err = e                                       
+      49 +    raise RuntimeError(f"All Gemini models failed. Last error: 
+         +{last_err}")                                                   
+      50 +                                                               
+      51 +                                                               
+      52  # =============================================================
+          === extraction
+      53  
+      54  class Leader(BaseModel):
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The end-to-end run works, with 25 records and their source URLs cited in the
+  answer. A redirect pulled in an off-domain page, so I'm making the crawler
+  skip off-domain redirects, then smoke-testing the Streamlit app. · summary
+
+● Update(scraper.py)
+  ⎿  Added 2 lines
+      182          if not res:
+      183              continue
+      184          final_url, html = res
+      185 +        if bare_domain(final_url) != domain:                  
+      186 +            continue  # redirected off-site                   
+      187          if final_url.rstrip("/") in visited - {best}:
+      188              continue  # redirected to a page we already have
+      189          visited.add(final_url.rstrip("/"))
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Update(app.py)
+  ⎿  Added 1 line, removed 1 line
+      51      st.stop()
+      52  
+      53  leaders = db.get_leaders(company_id)
+      54 -with st.expander(f"Leadership table ({len(leaders)} people)", e
+         -xpanded=not leaders or len(leaders) < 15):                     
+      54 +with st.expander(f"Leadership table ({len({p['name'] for p in l
+         +eaders})} people, {len(leaders)} sourced records)", expanded=no
+         +t leaders or len(leaders) < 15):                               
+      55      if leaders:
+      56          st.dataframe(
+      57              pd.DataFrame(leaders),
+
+● The system works end to end. I tested it on anthropic.com: it found the
+  /company/leadership page and the Wikipedia article, stored 25 leader records
+  with source URLs in SQLite, and answered questions in the Streamlit chat with
+  cited sources. No errors came up in the app test.
+
+  To run it: streamlit run app.py, enter a URL in the sidebar, click Collect,
+  then ask questions.
+
+  What each file does
+  - scraper.py finds and fetches the pages:
+    - It checks robots.txt, then ranks links on the homepage by leadership
+      keywords (leadership, executive, team, board…). It also tries common paths
+      like /about/leadership and follows one more level of links.
+    - It skips blog, news, research and careers sections, and pages that
+      redirect to another domain.
+    - It also pulls the company's Wikipedia infobox, but only if the article
+      links back to the company's domain.
+  - rag.py does the Gemini work:
+    - Collecting: Gemini pulls name, title, department and seniority out of each
+      page in a fixed structured format. A person is kept only if their name
+      appears word for word on the page, which guards against made-up names. The
+      source URL is attached by the code, not by the model, so citations always
+      point to a page that was really fetched.
+    - Answering: the prompt gets the full leadership table plus the stored page
+      excerpts that best match the question by keyword. Gemini has to answer
+      only from that and cite URLs.
+  - database.py has three SQLite tables: companies, leaders (each with a
+    source_url) and sources (the raw page text). Collecting a company again
+    replaces its old data.
+  - app.py is the Streamlit app: a sidebar to collect or pick a company, a
+    leadership table with clickable source links, and the chat.
+  - I also filled in requirements.txt and README.md, which covers the design
+    choices and limitations, and added leadership.db to .gitignore.
+
+  Problems I hit while testing
+  - Gemini model: gemini-2.5-flash is no longer offered to new users.
+    gemini-3.8-flash kept returning 503 (overloaded), and the SDK retried it
+    quietly until the run hung. The default is now gemini-3.5-flash. Calls have
+    a 60s timeout and switch to other models automatically on 503/429 errors.
+    You can change the model with GEMINI_MODEL in .env.
+  - Duplicate people: someone who appears on both the company site and Wikipedia
+    gets two rows, one per source. I kept it that way so each fact has its own
+    citation, and the answers already merge them correctly. The table header
+    shows both counts ("N people, M sourced records").
+
+  Limitations for your write-up (also in the README)
+  - Team pages built with JavaScript, and sites that block bots, won't return
+    much. Adding Playwright would fix that.
+  - Coverage is limited to the company site and Wikipedia. SEC DEF 14A filings
+    and press releases would be the next sources to add.
+
+> <ide_opened_file>The user opened the file c:\OneDrive\OneDrive - California
+  State University, Sacramento\Desktop\Work\Volt\project_Company Leadership RAG
+  Agent\.env in the IDE. This may or may not be related to the current
+  task.</ide_opened_file>
+
+> I want to improve our existing Company Leadership RAG Agent by using Tavily
+  Search API.
+
+  Currently, scraping meetcampfire.com does not reliably discover leadership
+  information.
+
+  Please:
+  1. Inspect the existing data collection implementation.
+  2. Integrate Tavily Search API as a discovery layer.
+  3. Search for C-level executives, VPs, and department heads using multiple
+  targeted queries.
+  4. Retrieve supporting source content and preserve URLs.
+  5. Extract structured leadership records and deduplicate them.
+  6. Keep the existing SQLite database and Gemini-powered chat interface.
+  7. Handle missing or unverifiable information without hallucinating.
+  8. Avoid hardcoding company-specific leadership details.
+
+  Make minimal changes and explain them before implementation.
+
+● Let me start by checking why the current crawler misses leadership on
+  meetcampfire.com, and whether a Tavily key and client are available.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Why it fails today
+
+  - meetcampfire.com redirects to campfire.ai. The homepage nav has products,
+    customers, careers and blog, but no About, Team or Leadership link, and the
+    usual paths (/about, /leadership, /team…) don't return pages. So the crawler
+    only reaches product pages.
+  - No Wikipedia article links to campfire.ai, so that fallback finds nothing
+    either.
+  - "Campfire" is a common name, so any search has to be pinned to the domain,
+    and every result has to be checked for whether it's really this company.
+
+  Planned changes (small, no hardcoded company data)
+
+  1. New search.py for Tavily discovery. It runs about 6 query templates built
+     only from the company name and domain: leadership team; CEO/founder;
+     C-suite; VP; head of / director; plus one search limited to the company's
+     own site. It asks Tavily for the full page text, removes duplicate URLs,
+     and returns the same Page(url, text) objects the crawler already returns.
+     Everything after that stays the same.
+  2. rag.ingest_company: runs crawl, then Wikipedia, then Tavily. A failed crawl
+     is no longer fatal when Tavily is available. Gemini calls run in parallel
+     because there are more pages now.
+  3. Stricter anti-hallucination checks. Gemini must return an evidence quote
+     copied from the page that shows the person's role. A record is kept only if
+     the name and that quote both actually appear in the page text. The prompt
+     also gets the company's domain and description, and is told to return
+     nothing for pages about a different company with the same name.
+  4. Deduplication. Records are merged by normalized name ("Mariano-Florentino
+     (Tino) Cuéllar" and "Mariano-Florentino Cuéllar" become one person). The
+     title from the company's own site is preferred, then the most specific
+     title. All source URLs for a person are kept.
+  5. SQLite. Same tables, plus two new columns on leaders: source_urls and
+     evidence. Existing databases get them added automatically (ALTER TABLE).
+     The chat context and the table in the UI show all sources and the evidence
+     quote.
+
+  Implementing now.
+
+● Write(search.py)
+  ⎿  Wrote 73 lines to search.py
+      1 """Tavily-powered discovery of public pages that mention a compan
+        y's leaders.
+      2
+      3 Complements scraper.py for sites without a crawlable leadership p
+        age. Queries are
+      4 built only from the company name and domain - nothing company-spe
+        cific is hardcoded.
+      5 """
+      6
+      7 import os
+     … +66 lines (ctrl+o to expand)
+
+● Now the database: two new columns, a migration for existing databases, and
+  saving the merged records.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Update(database.py)
+  ⎿  Added 1 line, removed 2 lines
+      101              (p.get("department") or "").strip(),
+      102              (p.get("seniority") or "other").strip(),
+      103              p["source_url"],
+      104 -            "                                                 
+      105 -".join(p.get("source_urls") or [p["source_url"]]),            
+      104 +            "\n".join(p.get("source_urls") or [p["source_url"]
+          +]),                                                           
+      105              (p.get("evidence") or "").strip(),
+      106          )
+      107          for p in leaders
+
+● Now rag.py: the evidence check, deduplication, Tavily in the ingest step, and
+  the extra fields in the chat context.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● The shell choked on quoting inside the heredoc, so I'll put the patch script
+  in a scratch file instead.
+
+  Made 2 scratchpad edits +197, ran 1 shell command (ctrl+o to expand)
+
+● Now the UI table, so it shows all sources and the evidence quote.
+
+● Update(app.py)
+  ⎿  Added 8 lines, removed 2 lines
+      53  leaders = db.get_leaders(company_id)
+      54  with st.expander(f"Leadership table ({len({p['name'] for p in l
+          eaders})} people, {len(leaders)} sourced records)", expanded=no
+          t leaders or len(leaders) < 15):
+      55      if leaders:
+      56 +        df = pd.DataFrame(leaders)                             
+      57 +        df["source_urls"] = df["source_urls"].fillna("").str.sp
+         +lit("\n")                                                      
+      58          st.dataframe(
+      57 -            pd.DataFrame(leaders),                             
+      58 -            column_config={"source_url": st.column_config.LinkC
+         -olumn("source")},                                              
+      59 +            df,                                                
+      60 +            column_config={                                    
+      61 +                "source_url": st.column_config.LinkColumn("prim
+         +ary source"),                                                  
+      62 +                "source_urls": st.column_config.ListColumn("all
+         + sources"),                                                    
+      63 +                "evidence": st.column_config.TextColumn("eviden
+         +ce (verbatim)"),                                               
+      64 +            },                                                 
+      65              hide_index=True,
+      66              width="stretch",
+      67          )
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Now the real test on meetcampfire.com.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The test found 16 leaders where the crawler found none, but it exposed four
+  problems I'm fixing: a race in creating the Gemini client, names with only a
+  first name or initials slipping through, " at {company}" suffixes in titles,
+  and conflicting CTO roles that the chat prompt will report with their sources.
+  · summary
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Update(rag.py)
+  ⎿  Added 9 lines, removed 1 line
+      19  # Tried in order if the primary model is overloaded (503) or ra
+          te-limited (429).
+      20  FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-3.5-flash-lite",
+           "gemini-3.1-flash-lite"]
+      21  _client: genai.Client | None = None
+      22 +_client_lock = threading.Lock()                                
+      23  
+      24  
+      25  def client() -> genai.Client:
+      26      global _client
+      26 -    if _client is None:                                        
+      27 +    with _client_lock:  # extraction runs in threads; build exa
+         +ctly one client                                                
+      28 +        if _client is None:                                    
+      29 +            _client = _make_client()                           
+      30 +    return _client                                             
+      31 +                                                               
+      32 +                                                               
+      33 +def _make_client() -> genai.Client:                            
+      34 +    if True:                                                   
+      35          key = os.getenv("GEMINI_API_KEY")
+      36          if not key:
+      37              raise RuntimeError("GEMINI_API_KEY is not set. Add 
+          it to your .env file.")
+
+● That if True: placeholder is sloppy; replacing it with a clean function body.
+
+● Update(rag.py)  ⎿  Added 10 lines, removed 12 lines
+      31  
+      32  
+      33  def _make_client() -> genai.Client:
+      34 -    if True:                                                   
+      35 -        key = os.getenv("GEMINI_API_KEY")                      
+      36 -        if not key:                                            
+      37 -            raise RuntimeError("GEMINI_API_KEY is not set. Add 
+         -it to your .env file.")                                        
+      38 -        # Bounded timeout/retries so an overloaded model fails 
+         -fast instead of hanging.                                       
+      39 -        _client = genai.Client(                                
+      40 -            api_key=key,                                       
+      41 -            http_options=types.HttpOptions(                    
+      42 -                timeout=60_000, retry_options=types.HttpRetryOp
+         -tions(attempts=2)                                              
+      43 -            ),                                                 
+      44 -        )                                                      
+      45 -    return _client                                             
+      34 +    key = os.getenv("GEMINI_API_KEY")                          
+      35 +    if not key:                                                
+      36 +        raise RuntimeError("GEMINI_API_KEY is not set. Add it t
+         +o your .env file.")                                            
+      37 +    # Bounded timeout/retries so an overloaded model fails fast
+         + instead of hanging.                                           
+      38 +    return genai.Client(                                       
+      39 +        api_key=key,                                           
+      40 +        http_options=types.HttpOptions(                        
+      41 +            timeout=60_000, retry_options=types.HttpRetryOption
+         +s(attempts=2)                                                  
+      42 +        ),                                                     
+      43 +    )                                                          
+      44  
+      45  
+      46  def generate(contents, config: types.GenerateContentConfig):
+
+● Update(rag.py)
+  ⎿  Added 1 line
+      2  
+      3  import os
+      4  import re
+      5 +import threading                                                
+      6  from concurrent.futures import ThreadPoolExecutor, as_completed
+      7  from typing import Literal
+      8  
+
+● Update(rag.py)
+  ⎿  Added 8 lines, removed 2 lines
+      152      return f"{tokens[0]} {tokens[-1]}" if len(tokens) >= 2 els
+           e " ".join(tokens)
+      153  
+      154  
+      155 -def dedupe(people: list[dict], company_domain: str) -> list[di
+          -ct]:                                                          
+      155 +def dedupe(people: list[dict], company_domain: str, company_na
+          +me: str) -> list[dict]:                                       
+      156      """Merge records of the same person across sources.
+      157  
+      158 +    Records without a verifiable full name (e.g. "John", "S. C
+          +.") are dropped.                                              
+      159      The primary record (name, title) comes from the company's 
+           own site when
+      160      available, otherwise the most senior / most specific title
+           . All sources are kept.
+      161      """
+      162 +    at_company = re.compile(rf"\s+(at|@)\s+{re.escape(company_
+          +name)}\.?$", re.I)                                            
+      163      groups: dict[str, list[dict]] = {}
+      164      for p in people:
+      163 -        groups.setdefault(_person_key(p["name"]), []).append(p
+          -)                                                             
+      165 +        key = _person_key(p["name"])                          
+      166 +        if len(key.split()) < 2:                              
+      167 +            continue                                          
+      168 +        p["title"] = at_company.sub("", (p.get("title") or "")
+          +.strip())  # "CTO at Acme" -> "CTO"                           
+      169 +        groups.setdefault(key, []).append(p)                  
+      170  
+      171      merged = []
+      172      for recs in groups.values():
+
+● Update(rag.py)
+  ⎿  Added 1 line, removed 1 line
+      227              note = f", {rejected} rejected (not supported by p
+           age text)" if rejected else ""
+      228              log(f"{page.url}: {len(people)} verified{note}")
+      229  
+      230 -    leaders = dedupe(found, domain)                           
+      230 +    leaders = dedupe(found, domain, name)                     
+      231      stored = db.save_leaders(company_id, leaders)
+      232      log(f"Done. {len(found)} records -> {stored} unique leader
+           s stored for {name}.")
+      233      return company_id
+
+● Update(rag.py)
+  ⎿  Added 3 lines
+      241  web pages, plus excerpts of those pages). Rules:
+      242  - Cite the source URL for each person or fact you mention, lik
+           e [source](URL).
+      243  - If the context does not contain the answer, say so plainly. 
+           Never guess names or titles.
+      244 +- Sources include third-party sites (news, LinkedIn, data aggr
+          +egators). Prefer the company's                                
+      245 +  own website when sources disagree. If two people appear to h
+          +old the same role, report both                                
+      246 +  with their sources and say the information may be conflictin
+          +g or outdated.                                                
+      247  - Note that the data reflects the pages at the time they were 
+           collected and may be outdated.
+      248  - Be concise. Use bullet points or a short table for lists of 
+           people."""
+      249  
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Extraction is clean now, with no initials-only or first-name-only records and
+  the conflicting CTO claim flagged instead of chosen. I'm checking the new
+  name, Sarvajit Sinha, and then smoke-testing the UI. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● One false positive came from a page about Campfire Interactive, a different
+  company with a similar name, so I'm adding a page-level check and company
+  context to the extraction prompt, then re-testing that page. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Update(rag.py)
+  ⎿  Added 2 lines
+      69  
+      70  
+      71  class LeaderList(BaseModel):
+      72 +    organization_on_page: str      # the organization the page 
+         +actually describes                                             
+      73 +    same_company: bool             # is that the company behind
+         + the given website?                                            
+      74      leaders: list[Leader]
+      75  
+      76  
+
+● Update(rag.py)
+  ⎿  Added 5 lines, removed 1 line
+      87  
+      88  Rules:
+      89  - Only include people explicitly named on the page with a role 
+          at this company.
+      90 -- If the page is about a DIFFERENT organization that shares the
+         - name, return an empty list.                                   
+      90 +- First decide which organization the page describes (organizat
+         +ion_on_page) and whether                                       
+      91 +  it is the same company as the website above (same_company). M
+         +any companies share                                            
+      92 +  names: a different full name (e.g. "{company} Interactive", "
+         +{company} Labs"), a                                            
+      93 +  different website, or a different industry/product means same
+         +_company=false.                                                
+      94 +  If same_company is false or you are unsure, set it to false a
+         +nd return an empty list.                                       
+      95  - Exclude former employees ("former", "ex-", "previously") and 
+          people at other companies.
+      96  - Copy names and titles exactly as written. Do not guess, infer
+          , or invent titles.
+      97  - evidence: a short verbatim quote (copied character-for-charac
+          ter from the page text)
+
+● Update(rag.py)
+  ⎿  Added 2 lines
+      130      parsed: LeaderList | None = resp.parsed
+      131      if not parsed:
+      132          return [], 0
+      133 +    if not parsed.same_company:  # page describes a different 
+          +organization                                                  
+      134 +        return [], len(parsed.leaders)                        
+      135  
+      136      # Grounding checks: the name AND the evidence quote must a
+           ppear in the page text.
+      137      haystack = _loose(page.text)
+
+● Update(rag.py)
+  ⎿  Added 1 line, removed 1 line
+      206          name = scraper.bare_domain(base).split(".")[0].title()
+      207          pages = []
+      208      domain = scraper.bare_domain(base)
+      209 -    context = pages[0].text[:800].replace("\n", " ") if pages 
+          -else "(unknown)"                                              
+      209 +    context = (scraper.site_description(pages[0].text) if page
+          +s else "") or "(unknown)"                                     
+      210  
+      211      wiki = scraper.fetch_wikipedia(name, base, log=log)
+      212      if wiki:
+
+● Update(scraper.py)
+  ⎿  Added 8 lines
+      232      return None
+      233  
+      234  
+      235 +def site_description(homepage_text: str, max_chars: int = 600)
+          + -> str:                                                      
+      236 +    """Short description of what the company does: its title l
+          +ine plus the first                                            
+      237 +    sentence-like lines of the homepage (skipping short nav la
+          +bels)."""                                                     
+      238 +    lines = homepage_text.splitlines()                        
+      239 +    picked = lines[:1] + [ln for ln in lines[1:] if len(ln.spl
+          +it()) >= 6]                                                   
+      240 +    return " ".join(picked)[:max_chars]                       
+      241 +                                                              
+      242 +                                                              
+      243  def mentions_roles(text: str) -> bool:
+      244      return bool(ROLE_PATTERN.search(text))
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The Campfire Interactive page is now rejected, and the two valid pages still
+  give the same results. Final full run plus a chat check:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Results look right, and the general counsel question correctly gets "not in
+  the data". Two new entries have vague titles ("go-to-market", "engineering"),
+  so let me check their evidence:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The quote only says "founding team members … in engineering," not a leadership
+  title, so Gemini's department-head labels came from its own guess. I'm adding
+  a code-level check that requires the extracted title to contain a real
+  leadership role word, reusing ROLE_PATTERN. · summary
+
+● Update(rag.py)
+  ⎿  Added 4 lines, removed 2 lines
+      133      if not parsed.same_company:  # page describes a different 
+           organization
+      134          return [], len(parsed.leaders)
+      135  
+      136 -    # Grounding checks: the name AND the evidence quote must a
+          -ppear in the page text.                                       
+      136 +    # Grounding checks: the name AND the evidence quote must a
+          +ppear in the page text,                                       
+      137 +    # and the title must name an actual leadership role (not j
+          +ust "engineering").                                           
+      138      haystack = _loose(page.text)
+      139      out, rejected = [], 0
+      140      for p in parsed.leaders:
+      141          name, quote = _loose(p.name), _loose(p.evidence)
+      141 -        if name and name in haystack and quote and quote in ha
+          -ystack:                                                       
+      142 +        if (name and name in haystack and quote and quote in h
+          +aystack                                                       
+      143 +                and scraper.mentions_roles(p.title)):         
+      144              out.append({**p.model_dump(), "source_url": page.u
+           rl})
+      145          else:
+      146              rejected += 1
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Every real title passes, and the two vague ones are now rejected. I'll also
+  add "Board" to the role pattern so a title like "Board Member" isn't dropped,
+  then update the README.
+
+● Update(scraper.py)
+  ⎿  Added 1 line, removed 1 line
+      49  ROLE_PATTERN = re.compile(
+      50      r"\b(CEO|CFO|CTO|COO|CMO|CIO|CISO|CRO|CPO|Chief|President|V
+          ice President|VP|"
+      51      r"SVP|EVP|Director|Head of|Founder|Co-?founder|Chair(man|wo
+          man|person)?|"
+      52 -    r"Officer|General Counsel|Managing Director|Partner)\b"    
+      52 +    r"Officer|General Counsel|Managing Director|Partner|Board|D
+         +irectors)\b"                                                   
+      53  )
+      54  
+      55  
+
+  Read 1 file (ctrl+o to expand)
+
+● Write(README.md)
+  ⎿  Added 32 lines, removed 17 lines
+      1  # Company Leadership RAG Agent
+      2  
+      3 -Give it a company website URL. It finds the company's executives
+        -, VPs, and department heads on public pages, stores them in SQLi
+        -te with the URL each one came from, and lets you ask questions a
+        -bout them in a Streamlit chat. Answers come from Gemini and use 
+        -only the stored data.                                           
+      3 +Give it a company website URL. It finds the company's executives
+        +, VPs, and department heads on public pages: the company's own s
+        +ite, Wikipedia, and pages found through Tavily web search. It st
+        +ores them in SQLite with the URLs each one came from, and lets y
+        +ou ask questions about them in a Streamlit chat. Answers come fr
+        +om Gemini and use only the stored data.                         
+      4  
+      5  ## Quick start
+      6  
+     ...
+      14  
+      15  ```
+      16  GEMINI_API_KEY=your-key-here
+      17 +TAVILY_API_KEY=your-key-here      # optional; without it, only 
+         +the site crawler and Wikipedia are used                        
+      18  # optional; defaults to gemini-3.5-flash, with automatic fallba
+          ck
+      19  GEMINI_MODEL=gemini-3.5-flash
+      20  ```
+     ...
+      25  streamlit run app.py
+      26  ```
+      27  
+      27 -Enter a URL such as `anthropic.com` in the sidebar, click **Col
+         -lect**, then ask questions like *"Who runs engineering?"* or *"
+         -List all VPs with their sources."*                             
+      28 +Enter a URL such as `meetcampfire.com` in the sidebar, click **
+         +Collect**, then ask questions like *"Who runs engineering?"* or
+         + *"List all VPs with their sources."*                          
+      29  
+      30  ## Architecture
+      31  
+      32  ```
+      32 -URL ──► scraper.py ──► rag.ingest_company ──► database.py (SQLi
+         -te) ──► rag.answer ──► app.py                                  
+      33 -        crawl site       Gemini extracts         companies     
+         -         retrieve +      Streamlit                             
+      34 -        + Wikipedia      structured leaders      leaders       
+         -         generate        chat UI                               
+      35 -                         (JSON schema)           sources       
+      33 +            ┌─ scraper.py: crawl company site ─┐               
+      34 +URL ──►     ├─ scraper.py: Wikipedia infobox  ─┼─► rag.ingest_c
+         +ompany ──► database.py ──► rag.answer ──► app.py               
+      35 +            └─ search.py:  Tavily web search  ─┘   Gemini extra
+         +ction      (SQLite)        retrieve +     Streamlit            
+      36 +                                                    + verificat
+         +ion                         generate       chat UI             
+      37 +                                                    + deduplica
+         +tion                                                           
+      38  ```
+      39  
+      40  | File | Role |
+      41  |---|---|
+      40 -| `scraper.py` | Normalizes the URL, reads `robots.txt`, and sc
+         -ores links on the homepage by leadership keywords (leadership, 
+         -executive, team, board…). It also tries common paths like `/abo
+         -ut/leadership` and follows one more level of links from the pag
+         -es it fetches. It skips blog, news, and careers sections. It al
+         -so pulls the company's Wikipedia infobox, but only when the art
+         -icle links to the company's domain. |                          
+      41 -| `rag.py` | **Ingest:** sends each page that mentions a leader
+         -ship role (CEO, VP, Head of…) to Gemini with a Pydantic respons
+         -e schema. It keeps a person only if their name appears word for
+         - word in the page text, which is a simple guard against halluci
+         -nation. **Answer:** builds the context from the full leadership
+         - table plus the stored page chunks that best match the question
+         - by keyword overlap. Gemini must answer from that context only 
+         -and cite source URLs. |                                        
+      42 -| `database.py` | Holds three tables. `companies` has one row p
+         -er URL. `leaders` stores name, title, department, seniority, an
+         -d `source_url`; it is unique per company, name, and title. `sou
+         -rces` stores the raw page text for retrieval. Collecting a comp
+         -any again replaces its old data. |                             
+      43 -| `app.py` | Streamlit app. The sidebar collects a new company 
+         -or picks a stored one. The main area shows the leadership table
+         - with source links and the chat. |                             
+      42 +| `scraper.py` | Normalizes the URL, reads `robots.txt`, and sc
+         +ores links on the homepage by leadership keywords. It also trie
+         +s common paths like `/about/leadership`, follows one more level
+         + of links, and skips blog, news, and careers sections. It pulls
+         + the company's Wikipedia infobox, but only when the article lin
+         +ks to the company's domain. |                                  
+      43 +| `search.py` | **Tavily discovery layer.** Runs 6 query templa
+         +tes built only from the company name and domain: leadership tea
+         +m; CEO/founder; C-suite; VP; head of / director; plus one searc
+         +h limited to the company's own site. It asks Tavily for full pa
+         +ge text, removes duplicate URLs, and drops results that don't m
+         +ention the company. This finds leaders on sites with no crawlab
+         +le team page, through news coverage, press releases, the compan
+         +y blog, LinkedIn, and similar pages. |                         
+      44 +| `rag.py` | **Ingest:** sends each candidate page to Gemini (i
+         +n parallel) with a Pydantic response schema, then checks the re
+         +sults (see below) and removes duplicates. **Answer:** builds th
+         +e context from the full leadership table (all sources plus evid
+         +ence quotes) and the page chunks that best match the question b
+         +y keyword overlap. Gemini must answer from that context only an
+         +d cite URLs. |                                                 
+      45 +| `database.py` | Holds three tables. `companies`; `leaders` (n
+         +ame, title, department, seniority, primary `source_url`, all `s
+         +ource_urls`, and a verbatim `evidence` quote); and `sources` (r
+         +aw page text for retrieval). Older databases get the new column
+         +s added automatically. Collecting a company again replaces its 
+         +old data. |                                                    
+      46 +| `app.py` | Streamlit app. The sidebar collects a new company 
+         +or picks a stored one. The main area shows the leadership table
+         + with sources and evidence, and the chat. |                    
+      47  
+      45 -## Design choices                                              
+      48 +## Avoiding hallucination                                      
+      49  
+      47 -- **LLM extraction instead of CSS selectors.** Every site lays 
+         -out its team page differently. A schema-constrained LLM call wo
+         -rks on all of them, and the grounding check (the name must appe
+         -ar on the page) catches invented names.                        
+      48 -- **Source URL is attached by code, not by the model.** So a ci
+         -tation always points to the page that was actually fetched.    
+      49 -- **Retrieval is simple on purpose.** One company's leadership 
+         -table is small enough to put in the prompt in full. Keyword ret
+         -rieval over page text adds supporting detail. With many compani
+         -es or long documents, embeddings would be the next step.       
+      50 +A record is stored only if it passes every check below. All of 
+         +them are generic, and no company-specific data is hardcoded.   
+      51  
+      52 +1. **Same company.** Gemini first names the organization the pa
+         +ge describes and decides whether it is the company behind the g
+         +iven website. Pages about a different company with the same nam
+         +e (e.g. "Campfire Interactive" vs. campfire.ai) are thrown out.
+      53 +2. **Name on the page.** The person's name must appear in the f
+         +etched page text.                                              
+      54 +3. **Verbatim evidence.** Gemini must quote the passage that sh
+         +ows the role, and the quote must actually be in the page text (
+         +case and punctuation are ignored).                             
+      55 +4. **A real title.** The title must name a leadership role (CEO
+         +, VP, Head of, Director, Founder, Board…). Vague wording like "
+         +Jane in engineering" is rejected.                              
+      56 +5. **Full name.** First-name-only or initials-only records are 
+         +dropped.                                                       
+      57 +6. **URLs come from code.** Source URLs are attached by the cod
+         +e, never written by the model.                                 
+      58 +                                                               
+      59 +At answer time, Gemini says plainly when the data has no answer
+         +. When sources disagree (e.g. two people listed as CTO), it rep
+         +orts both with their sources instead of picking one.           
+      60 +                                                               
+      61 +## Deduplication                                               
+      62 +                                                               
+      63 +Records are grouped by a normalized name key: lowercase, with p
+         +unctuation, nicknames in parentheses, honorifics (Dr.), suffixe
+         +s (PhD, Jr.), and middle initials removed. The key uses the fir
+         +st and last name. For each person, the title and department com
+         +e from the company's own website when possible, otherwise from 
+         +the most senior and most specific record. Every supporting URL 
+         +is kept in `source_urls`. Phrases like "CTO at Acme" are cleane
+         +d to "CTO".                                                    
+      64 +                                                               
+      65  ## Limitations / next steps
+      66  
+      53 -- Sites that render their team page with JavaScript, or that bl
+         -ock bots (Cloudflare and similar), return little text. Adding P
+         -laywright would fix this.                                      
+      54 -- Public sources are limited to the company site and Wikipedia.
+         - Press releases, SEC filings (DEF 14A for public companies), an
+         -d Crunchbase would improve coverage. Logins and LinkedIn scrapi
+         -ng were left out on purpose.                                   
+      55 -- The data is only as fresh as the last collection, and there i
+         -s no deduplication across name variants (for example "Bob" vs. 
+         -"Robert").                                                     
+      67 +- Third-party sources (data aggregators, old blog posts) can be
+         + out of date. The chat flags conflicts but can't tell which sou
+         +rce is current. Weighting by date or by type of source would he
+         +lp.                                                            
+      68 +- Tavily results change between runs, so collecting the same co
+         +mpany twice may give a slightly different set of people.       
+      69 +- Sites that render their team page with JavaScript, or that bl
+         +ock bots, still return little text from the crawler. Tavily oft
+         +en makes up for it.                                            
+      70 +- Name matching uses first and last name only, so "Bob" vs. "Ro
+         +bert" are not merged.                                          
+
+  Ran 1 shell command (ctrl+o to expand)
+● Tavily search is now part of data collection. On meetcampfire.com it finds 13
+  leaders with source URLs (the CEO/founder, CTO, a VP of Sales and department
+  heads); the crawler alone found 0. The table and chat still use the same
+  SQLite database and Gemini setup.
+
+  Why the crawler failed: meetcampfire.com redirects to campfire.ai. That site
+  has no About, Team or Leadership page the crawler can reach, and no Wikipedia
+  article. "Campfire" is also a common company name.
+
+  What changed
+  - New search.py: runs 6 searches built only from the company name and domain
+    (leadership team, CEO/founder, C-suite, VPs, heads/directors, plus one on
+    the company's own site). It keeps each page's full text and URL and drops
+    results that don't mention the company.
+  - rag.py:
+    - Collection now uses the crawler, Wikipedia and Tavily together. If the
+      site can't be fetched, it carries on with search only.
+    - Gemini reads the pages in parallel, which needed a fix so the threads
+      share one Gemini connection.
+    - Every person passes the checks below, then duplicates are merged.
+  - database.py: same tables, plus two columns on leaders: source_urls (every
+    supporting URL) and evidence (the quote showing the role). Your existing
+    leadership.db gets them added automatically.
+  - app.py: the table also shows all sources and the evidence quote.
+  - I also updated README.md and requirements.txt.
+
+  Checks against made-up or wrong data. These work for any company; nothing
+  about Campfire is hardcoded.
+  - Same company: Gemini first decides whether the page is about the company
+    behind the website. This dropped a "Campfire Interactive" page that had
+    added a wrong board member.
+  - Evidence: the person's name and a quote showing their role must both appear
+    in the fetched page text.
+  - Real title: the title must name an actual leadership role. This dropped two
+    people a 2023 company blog post called "founding team members in
+    engineering".
+  - Full name: first-name-only or initials-only records ("John", "S. C.") are
+    dropped.
+  - URLs: source URLs are attached by the code, never written by Gemini.
+  - In the chat: when the data has no answer it says so. Asked for a general
+    counsel, it said none was listed. When sources disagree, it shows both with
+    their sources instead of picking one.
+
+  Duplicates: the same person from several sources is merged into one row with
+  all their URLs. The title from the company's own site wins when there is one,
+  and "CTO at Campfire" is cleaned to "CTO".
+
+  Things to know
+  - I didn't re-run the full Campfire collection after the last two changes (the
+    real-title check and adding "Board"). I tested the title check on the real
+    titles, and it drops exactly the two vague entries, which is how I get 13
+    from the last run's 15.
+  - The data has one open conflict: Campfire's 2023 blog names Fernando San
+    Martin as CTO, while RocketReach lists Paul C Nichols. The chat shows both
+    rather than guessing which is current.
+  - Tavily results change slightly between runs. Each collection uses about 12
+    Tavily credits (6 advanced searches).
