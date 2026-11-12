@@ -57,6 +57,7 @@ ROLE_PATTERN = re.compile(
 class Page:
     url: str
     text: str
+    published: str = ""   # publication date, when the source provides one
 
 
 # ---------------------------------------------------------------- utilities

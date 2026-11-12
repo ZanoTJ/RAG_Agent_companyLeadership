@@ -67,7 +67,8 @@ def discover(company_name: str, company_url: str, seen_urls: set[str] | None = N
                 continue
             seen.add(url)
             title = r.get("title") or ""
-            pages.append(Page(url, f"{title}\n{text}"[:MAX_CHARS_PER_PAGE]))
+            pages.append(Page(url, f"{title}\n{text}"[:MAX_CHARS_PER_PAGE],
+                              published=r.get("published_date") or ""))
             new += 1
         log(f"Search: {query} -> {new} new pages")
     return pages

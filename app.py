@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 
 import database as db
+import entities
 import rag
 
 st.set_page_config(page_title="Company Leadership RAG Agent", page_icon="🏢", layout="wide")
@@ -51,13 +52,18 @@ if not company_id:
     st.stop()
 
 leaders = db.get_leaders(company_id)
-with st.expander(f"Leadership table ({len(leaders)} people)", expanded=not leaders or len(leaders) < 15):
+counts = {s: sum(p["status"] == s for p in leaders) for s in ("current", "unverified", "former")}
+label = (f"Leadership table ({len(leaders)} unique people: {counts['current']} current, "
+         f"{counts['unverified']} unverified, {counts['former']} former)")
+with st.expander(label, expanded=not leaders or len(leaders) < 15):
     if leaders:
-        df = pd.DataFrame(leaders)
+        df = pd.DataFrame(leaders).drop(columns=["id"])
         df["source_urls"] = df["source_urls"].fillna("").str.split("\n")
         st.dataframe(
             df,
             column_config={
+                "aliases": st.column_config.ListColumn("also written as"),
+                "title": st.column_config.TextColumn("current title"),
                 "source_url": st.column_config.LinkColumn("primary source"),
                 "source_urls": st.column_config.ListColumn("all sources"),
                 "evidence": st.column_config.TextColumn("evidence (verbatim)"),
@@ -65,6 +71,14 @@ with st.expander(f"Leadership table ({len(leaders)} people)", expanded=not leade
             hide_index=True,
             width="stretch",
         )
+        roles = db.get_role_history(company_id)
+        if roles:
+            with st.popover("Role history (all reported titles by source)"):
+                rdf = pd.DataFrame(roles).drop(columns=["leader_id"])
+                rdf["source_tier"] = rdf["source_tier"].map(entities.TIER_LABEL)
+                rdf["is_current_title"] = rdf["is_current_title"].astype(bool)
+                st.dataframe(rdf, hide_index=True, width="stretch",
+                             column_config={"source_url": st.column_config.LinkColumn("source")})
     else:
         st.warning(
             "No leaders found. The site may render its team page with JavaScript, "

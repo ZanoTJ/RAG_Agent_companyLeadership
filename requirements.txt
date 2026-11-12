@@ -6,3 +6,4 @@ python-dotenv>=1.0
 requests>=2.31
 streamlit>=1.40
 tavily-python>=0.5
+pytest>=8.0
