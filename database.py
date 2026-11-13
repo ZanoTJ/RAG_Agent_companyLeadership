@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS companies (
     url         TEXT NOT NULL UNIQUE,
     scraped_at  TEXT,
     resolved_version   INTEGER DEFAULT 0,  -- entity-resolution logic version last applied
-    removed_unverified INTEGER DEFAULT 0   -- people dropped for lack of acceptable evidence
+    removed_unverified INTEGER DEFAULT 0,  -- people dropped for lack of acceptable evidence
+    collection_report  TEXT                -- JSON: sources/candidates found, rejected, accepted
 );
 
 CREATE TABLE IF NOT EXISTS leaders (
@@ -27,12 +28,13 @@ CREATE TABLE IF NOT EXISTS leaders (
     name        TEXT NOT NULL,
     title       TEXT,
     department  TEXT,
-    seniority   TEXT,          -- executive | vp | department_head | board | other
+    seniority   TEXT,          -- executive | vp | department_head (from the title)
     source_url  TEXT NOT NULL,  -- primary (best) source
     source_urls TEXT,           -- all supporting sources, newline-separated
     evidence    TEXT,           -- verbatim quote from the source showing the role
     aliases     TEXT,           -- JSON list of other spellings of this person's name
     as_of       TEXT,           -- effective date of the title's evidence (internal)
+    conflict    TEXT,           -- unresolved disagreement between sources, if any
     UNIQUE (company_id, name, title)
 );
 
@@ -47,7 +49,9 @@ CREATE TABLE IF NOT EXISTS role_history (
     source_tier      INTEGER,   -- 1 official/filing, 2 other accepted public source
     source_type      TEXT,      -- official | regulatory | news | reference | professional_profile
     evidence         TEXT,
-    is_current_title INTEGER DEFAULT 0
+    is_current_title INTEGER DEFAULT 0,
+    ended            INTEGER DEFAULT 0  -- 1 = evidence that this role ended (hidden; used
+                                        --     so re-checks keep cancelling older claims)
 );
 
 -- Accepted sources only, stored as relevant passages rather than whole pages.
@@ -83,7 +87,8 @@ _ADDED_COLUMNS = [
     ("companies", "resolved_version", "INTEGER DEFAULT 0"),
     ("companies", "removed_unverified", "INTEGER DEFAULT 0"),
     ("sources", "source_type", "TEXT"), ("sources", "published", "TEXT"),
-    ("sources", "origin", "TEXT"),
+    ("sources", "origin", "TEXT"), ("leaders", "conflict", "TEXT"),
+    ("companies", "collection_report", "TEXT"), ("role_history", "ended", "INTEGER DEFAULT 0"),
 ]
 # Columns removed: status is no longer stored (freshness is computed from dates).
 _DROPPED_COLUMNS = [("role_history", "status"), ("leaders", "status")]
@@ -178,7 +183,7 @@ def collected_on(company: dict | None) -> date | None:
 
 
 def set_company_fields(company_id: int, db_path: str | None = None, **fields) -> None:
-    allowed = {"resolved_version", "removed_unverified"}
+    allowed = {"resolved_version", "removed_unverified", "collection_report"}
     assert set(fields) <= allowed, fields
     with get_conn(db_path) as conn:
         for k, v in fields.items():
@@ -285,13 +290,13 @@ def save_people(company_id: int, people: list[dict], db_path: str | None = None)
             cur = conn.execute(
                 """INSERT OR IGNORE INTO leaders
                    (id, company_id, name, title, department, seniority, source_url,
-                    source_urls, evidence, aliases, as_of)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    source_urls, evidence, aliases, as_of, conflict)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (p.get("id"), company_id, p["name"].strip(), (p.get("title") or "").strip(),
                  (p.get("department") or "").strip(), p.get("seniority") or "other",
                  p["source_url"], "\n".join(p.get("source_urls") or [p["source_url"]]),
                  (p.get("evidence") or "").strip(), json.dumps(p.get("aliases") or []),
-                 p.get("as_of") or ""),
+                 p.get("as_of") or "", p.get("conflict") or ""),
             )
             if not cur.rowcount:
                 continue
@@ -299,12 +304,13 @@ def save_people(company_id: int, people: list[dict], db_path: str | None = None)
             conn.executemany(
                 """INSERT INTO role_history (leader_id, name, title, as_of, source_url,
                                              source_tier, source_type, evidence,
-                                             is_current_title)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                             is_current_title, ended)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(cur.lastrowid, r.get("name") or p["name"], r["title"], r.get("as_of") or "",
                   r["source_url"], r.get("source_tier"), r.get("source_type") or "",
-                  r.get("evidence") or "", int(bool(r.get("is_current_title"))))
-                 for r in p.get("roles", [])],
+                  r.get("evidence") or "", int(bool(r.get("is_current_title"))), ended)
+                 for ended, rows in ((0, p.get("roles", [])), (1, p.get("ended", [])))
+                 for r in rows],
             )
     return stored
 
@@ -320,14 +326,14 @@ def replace_people(company_id: int, people: list[dict], db_path: str | None = No
 def get_leaders(company_id: int, db_path: str | None = None) -> list[dict]:
     """One row per unique person, by seniority. `person_id` is internal (citations,
     counting); `may_be_outdated` is computed from the evidence date, not stored."""
-    order = """CASE seniority WHEN 'executive' THEN 0 WHEN 'board' THEN 1
-               WHEN 'vp' THEN 2 WHEN 'department_head' THEN 3 ELSE 4 END"""
+    order = """CASE seniority WHEN 'executive' THEN 0 WHEN 'vp' THEN 1
+               WHEN 'department_head' THEN 2 ELSE 3 END"""
     company = get_company(company_id, db_path)
     with get_conn(db_path) as conn:
         rows = conn.execute(
             f"""SELECT id AS person_id, name, aliases, title, department, seniority,
                        source_url, COALESCE(source_urls, source_url) AS source_urls,
-                       evidence, as_of
+                       evidence, as_of, COALESCE(conflict, '') AS conflict
                 FROM leaders WHERE company_id = ? ORDER BY {order}, name""",
             (company_id,),
         ).fetchall()
@@ -348,7 +354,7 @@ def get_role_history(company_id: int, db_path: str | None = None) -> list[dict]:
                       r.source_url, r.source_tier, r.source_type, r.evidence,
                       r.is_current_title
                FROM role_history r JOIN leaders l ON l.id = r.leader_id
-               WHERE l.company_id = ?
+               WHERE l.company_id = ? AND COALESCE(r.ended, 0) = 0
                ORDER BY l.name, r.is_current_title DESC, r.source_tier, r.as_of DESC""",
             (company_id,),
         ).fetchall()
@@ -373,6 +379,7 @@ def load_resolution_records(company_id: int, db_path: str | None = None) -> list
             if roles:
                 for r in roles:
                     records.append({**base, "name": r["name"] or l["name"], "title": r["title"],
+                                    "status": "former" if r["ended"] else "current",
                                     "as_of": r["as_of"], "source_url": r["source_url"],
                                     "source_type": r["source_type"] or "",
                                     "evidence": r["evidence"]})

@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 leadership.db
 backups/
+tests/

@@ -76,7 +76,13 @@ def test_alternative_name_without_name_similarity_found_by_role_overlap():
 
 
 def test_alternative_name_kept_separate_when_evidence_check_says_no():
-    assert len(resolve(HUANG, "nvidia.com", FakeResolver(same=False))) == 2
+    # Kept separate - but then two people claim the one-person CEO role, and the live
+    # company page (current) supersedes the other claim.
+    stats = {}
+    people = resolve_people(HUANG, "nvidia.com", "", resolver=FakeResolver(same=False),
+                            fetched_on=date(2026, 11, 12), stats=stats)
+    assert [p["name"] for p in people] == ["Jensen Huang"]
+    assert "CEO role superseded" in stats["excluded"][0]["reason"]
 
 
 # ---------------------------------------------------------------- earlier cases
@@ -90,7 +96,7 @@ def test_alternative_name_kept_separate_when_evidence_check_says_no():
      rec("Vladimir Tenev", "Chair of the Board and Chief Executive Officer",
          "https://www.sec.gov/Archives/x.htm", as_of="2025-04-25"),
      "robinhood.com"),
-    (rec("Baiju Bhatt", "Co-Founder", "https://robinhood.com/newsroom/x"),
+    (rec("Baiju Bhatt", "Co-Founder and Chief Creative Officer", "https://robinhood.com/newsroom/x"),
      rec("Baiju Bhat", "Co-Founder", "https://fintechleaders.substack.com/p/x"),
      "robinhood.com"),
 ])
@@ -118,7 +124,7 @@ def test_same_surname_and_same_generic_title_never_compared():
         rec("Mark Stevens", "Director", "https://www.nvidia.com/board"),
         rec("Mary Stevens", "Independent Director", "https://www.nvidia.com/board"),
     ], "nvidia.com", never_called)
-    assert len(people) == 2
+    assert people == []  # never compared, and board-only roles are not leadership
 
 
 def test_same_title_different_surname_never_compared():
@@ -134,7 +140,8 @@ def test_same_surname_overlapping_role_is_only_a_candidate():
     resolver = FakeResolver(same=False)
     people = resolve([
         rec("Amy Chen", "VP, Hardware Engineering", "https://www.nvidia.com/a"),
-        rec("Brian Chen", "Senior Director, Hardware Engineering", "https://www.nvidia.com/b"),
+        rec("Brian Chen", "Senior Director, Hardware Engineering", "https://www.nvidia.com/b",
+            seniority="department_head"),
     ], "nvidia.com", resolver)
     assert len(resolver.calls) == 1 and len(people) == 2
 
@@ -209,7 +216,10 @@ def test_failed_check_leaves_company_marked_for_retry(tmp_db):
         raise RuntimeError("API down")
     stats = rag.reresolve_company(cid, resolver=broken, classifier=accept_all, log=lambda m: None)
     assert stats["failed"] == 1
-    assert len(db.get_leaders(cid)) == 3                     # nothing merged
+    names = {p["name"] for p in db.get_leaders(cid)}
+    # Nothing merged; the unverified duplicate's CEO claim is superseded by the
+    # company's own page (only one person can be CEO).
+    assert names == {"Jensen Huang", "Colette Kress"}
     assert db.get_company(cid)["resolved_version"] == 0      # retried next time
 
 

@@ -144,8 +144,11 @@ def test_ingest_never_stores_or_cites_rejected_sources(tmp_db, monkeypatch):
         n, t = people[page.url]
         return [{"name": n, "title": t, "department": "", "seniority": "executive",
                  "status": "current", "as_of": "", "evidence": f"{n}, {t}",
-                 "source_url": page.url}], 0
+                 "source_url": page.url}], []
     monkeypatch.setattr(rag, "extract_leaders", fake_extract)
+    searched = []
+    monkeypatch.setattr(search, "tavily_available", lambda: True)
+    monkeypatch.setattr(search, "web_search", lambda q, **k: searched.append(q) or [])
 
     cid = rag.ingest_company("acme.com", log=lambda m: None)
 
@@ -161,6 +164,14 @@ def test_ingest_never_stores_or_cites_rejected_sources(tmp_db, monkeypatch):
     off = next(s for s in db.get_sources(cid) if s["url"] == official.url)
     assert "Jane Doe" in off["content"] and len(off["content"]) < len(official.text)
     assert all(r["source_url"] in cited for r in db.get_role_history(cid))
+    # John Roe has a single non-official source: one corroboration search was made.
+    assert len(searched) == 1 and '"John Roe"' in searched[0]
+    # The collection report records every source decision.
+    import json
+    report = json.loads(db.get_company(cid)["collection_report"])
+    assert len(report["pages"]) == 4 and report["people"] == 2
+    assert {p["url"] for p in report["pages"] if not p["accepted"]} == {aggregator.url, contact.url}
+    assert all(p["reason"] for p in report["pages"])
 
 
 # ---------------------------------------------------------------- migration
@@ -383,8 +394,11 @@ def test_web_fallback_filters_caches_and_cites(nvidia):
     db, cid = nvidia
     queries = []
     results = [
-        Page("https://news.example.com/jh", "Profile: Jen-Hsun Huang works from Santa Clara. " * 5,
+        Page("https://news.example.com/jh",
+             "Profile: NVIDIA CEO Jen-Hsun Huang works from Santa Clara. " * 5,
              published="2026-03-01"),
+        # same name, but nothing ties this profile to the company: not evidence
+        Page("https://www.linkedin.com/in/jensen-huang-123", "Jensen Huang, Austin, TX. " * 10),
         Page("https://directory.example.ai/nvidia-people", "Jensen Huang CEO, contacts. " * 10),
         Page("https://unrelated.example.com/x", "Nothing about the person here. " * 10),
     ]
@@ -401,6 +415,7 @@ def test_web_fallback_filters_caches_and_cites(nvidia):
     assert len(queries) == 1 and '"Jensen Huang" NVIDIA' in queries[0]
     assert "based in city" in queries[0]
     assert "unrelated.example.com/x" not in clf.seen      # doesn't mention the person
+    assert "https://www.linkedin.com/in/jensen-huang-123" not in clf.seen  # no company named
     # Accepted passage cached as a web source; aggregator never stored.
     stored = {s["url"]: s for s in db.get_sources(cid)}
     assert stored["https://news.example.com/jh"]["origin"] == "web"
@@ -452,7 +467,9 @@ def test_customer_testimonials_are_not_extracted_as_leaders(monkeypatch):
     ])
     monkeypatch.setattr(rag, "generate", lambda *a, **k: type("R", (), {"parsed": parsed})())
     people, rejected = rag.extract_leaders("Acme", "acme.com", "", Page("https://acme.com/p", text))
-    assert [p["name"] for p in people] == ["Jane Doe"] and rejected == 1
+    assert [p["name"] for p in people] == ["Jane Doe"]
+    assert [(r["name"], r["reason"]) for r in rejected] == [
+        ("Brian Lee", "not an employee or board member")]
     assert "relationship" not in people[0]
 
 

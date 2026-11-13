@@ -115,7 +115,13 @@ def test_bhat_bhatt_spelling_variant_is_flagged_and_merged():
 
 
 def test_bhat_bhatt_stay_separate_when_evidence_check_says_no():
-    assert len(resolve(BHATT, FakeResolver(same=False))) == 2
+    stats = {}
+    people = resolve_people(BHATT, COMPANY, "Robinhood", resolver=FakeResolver(same=False),
+                            fetched_on=FETCHED, stats=stats)
+    # Kept separate; the "Baiju Bhat" record alone ("Co-Founder") is not a leadership role.
+    assert [p["name"] for p in people] == ["Baiju Bhatt"]
+    assert stats["excluded"][0]["name"] == "Baiju Bhat"
+    assert stats["excluded"][0]["reason"] == entities.REASON_NO_LEADERSHIP
 
 
 def test_bhatt_outdated_role_excluded_and_current_title_kept():
@@ -241,9 +247,10 @@ def test_source_tiers(url, tier):
     assert entities.source_tier(url, COMPANY) == tier
 
 
-def test_tier_follows_evaluated_source_type():
-    assert entities.source_tier("https://ir.example-host.com/x", COMPANY, "official") == 1
-    assert entities.source_tier("https://www.reuters.com/x", COMPANY, "news") == 2
+def test_llm_label_never_raises_source_tier():
+    # Only the URL decides: a third-party page labeled "official" stays tier 2.
+    assert entities.source_tier("https://ir.example-host.com/x", COMPANY, "official") == 2
+    assert entities.source_tier("https://stocktitan.net/sec-filings/x", COMPANY, "regulatory") == 2
 
 
 def test_aggregator_records_never_become_evidence():
@@ -273,7 +280,7 @@ def test_chat_context_counts_unique_people_not_records(tmp_path, monkeypatch):
 
     ctx, _urls = rag.build_context(cid, "How many executives are there?")
     assert "Unique people listed: 2" in ctx
-    assert "Executives: 2" in ctx
+    assert "C-level executives (incl. presidents): 2" in ctx
     assert ctx.count("\n- [P") == 2  # one bullet per person, not per source record
     assert "also written: Baiju Bhat" in ctx
     assert "Co-CEO" not in ctx.split("QUESTION IS ABOUT")[0]  # former role not listed

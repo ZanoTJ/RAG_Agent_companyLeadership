@@ -13,18 +13,32 @@ from scraper import MAX_CHARS_PER_PAGE, Page, bare_domain
 
 load_dotenv()
 
-# (query template, restrict to company domain?). Phrased to surface primary
-# sources - the company's own pages, press releases about appointments, filings,
-# and news coverage. Every result is still evaluated by source_policy.
+# (query template, where to search). Phrased to surface primary sources - the
+# company's own pages (incl. blog posts naming officers), appointment announcements,
+# filings, news, and public profiles. Every result is still evaluated by source_policy.
+# where: None = whole web, "site" = the company's own domain, or a list of domains.
 QUERY_TEMPLATES = [
-    ('"{name}" {domain} leadership team executives', False),
-    ('"{name}" {domain} CEO founder co-founder', False),
-    ('"{name}" appoints OR names chief officer', False),
-    ('"{name}" {domain} vice president OR "head of"', False),
-    ('"{name}" executive officers directors SEC filing proxy', False),
-    ("{name} leadership team management board", True),
+    ('"{name}" {domain} leadership team executives', None),
+    ('"{name}" {domain} CEO founder co-founder', None),
+    ('"{name}" appoints OR names chief officer', None),
+    ('"{name}" {domain} vice president OR "head of"', None),
+    ('"{name}" executive officers directors SEC filing proxy', None),
+    ('"{name}" {domain} chief marketing officer head of marketing', None),
+    # Plain keywords (no OR syntax) work best for these two; they get more results.
+    ("{name} CTO engineering team leadership", "site"),
+    ("{name} {domain} leadership team", ["linkedin.com"]),
 ]
 RESULTS_PER_QUERY = 5
+RESULTS_RESTRICTED = 10  # site- or domain-restricted queries
+
+
+def page_key(url: str) -> str:
+    """Same page under country subdomains or www. (e.g. fx.linkedin.com/company/x vs
+    www.linkedin.com/company/x) gets one key: registrable domain + path."""
+    from urllib.parse import urlparse
+
+    from entities import registrable_domain
+    return registrable_domain(url) + urlparse(url).path.rstrip("/").lower()
 
 
 def tavily_available() -> bool:
@@ -41,18 +55,18 @@ def discover(company_name: str, company_url: str, seen_urls: set[str] | None = N
 
     client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
     domain = bare_domain(company_url)
-    seen = {u.rstrip("/") for u in (seen_urls or set())}
+    seen = {page_key(u) for u in (seen_urls or set())}
     pages: list[Page] = []
 
-    for template, on_site in QUERY_TEMPLATES:
+    for template, where in QUERY_TEMPLATES:
         query = template.format(name=company_name, domain=domain)
         try:
             resp = client.search(
                 query,
                 search_depth="advanced",
-                max_results=RESULTS_PER_QUERY,
+                max_results=RESULTS_RESTRICTED if where else RESULTS_PER_QUERY,
                 include_raw_content="text",
-                include_domains=[domain] if on_site else None,
+                include_domains=[domain] if where == "site" else where,
             )
         except Exception as e:  # network / quota errors shouldn't abort ingestion
             log(f"Tavily search failed for '{query}': {e}")
@@ -61,14 +75,14 @@ def discover(company_name: str, company_url: str, seen_urls: set[str] | None = N
         new = 0
         for r in resp.get("results", []):
             url = (r.get("url") or "").rstrip("/")
-            if not url or url in seen:
+            if not url or page_key(url) in seen:
                 continue
             # Prefer full page text; fall back to the search snippet.
             text = (r.get("raw_content") or r.get("content") or "").strip()
             # Cheap relevance filter: the page must at least mention the company.
             if company_name.lower() not in text.lower() and domain not in text.lower():
                 continue
-            seen.add(url)
+            seen.add(page_key(url))
             title = r.get("title") or ""
             pages.append(Page(url, f"{title}\n{text}"[:MAX_CHARS_PER_PAGE],
                               published=r.get("published_date") or ""))

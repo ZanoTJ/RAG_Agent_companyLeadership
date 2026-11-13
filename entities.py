@@ -12,12 +12,17 @@ A shared surname or a shared title alone never makes a candidate. They merge onl
 the resolver confirms they are the same person. With no resolver, or on any
 error, they stay separate: a similar name alone never merges two people.
 
-Each resulting person keeps every alias and supporting source. Outdated roles are
-not stored: a role is dropped when a credible source says it has ended (and that
-source is at least as new as the claim); people with only former roles are
-excluded. The current title is chosen by source authority first, then recency, and
-is flagged "may be outdated" unless backed by a live company page or a source dated
-within STALE_AFTER_DAYS. No status is stored; freshness is computed from dates.
+Each resulting person keeps every alias and supporting source. Only leadership
+roles count (C-level, VP/SVP/EVP, head of a department - see leadership_level);
+board-only members and other titles are excluded. Outdated roles are not stored:
+a role is dropped when a credible source says it has ended or a newer source names
+someone else in the same one-person role (e.g. CTO); people left without a current
+leadership role are excluded, and so are people missing from the company's current
+roster pages whose evidence is old. The current title is chosen by source authority
+first, then recency, and is flagged "may be outdated" unless backed by current
+evidence: a live company page, the person's own profile listing it as current, or a
+source dated within STALE_AFTER_DAYS. Disagreeing sources are flagged, not hidden.
+No status is stored; freshness is computed from dates.
 
 This module makes no network calls; the resolver is injected (see rag.py).
 """
@@ -203,8 +208,88 @@ _ARTICLE_PATH = re.compile(
     r"/(blog|news|newsroom|press|press-releases?|articles?|posts?|stories|insights|"
     r"announcements?|media)(/|$)", re.I)
 TIER_LABEL = {1: "Official / filing", 2: "News / reference / profile"}
-RESOLUTION_VERSION = 3  # bump when resolution logic changes; stored data is re-resolved
+RESOLUTION_VERSION = 4  # bump when resolution logic changes; stored data is re-resolved
 OFFICIAL_TYPES = {"official", "regulatory"}
+
+# ---------------------------------------------------------------- leadership level
+
+LEVELS = ("executive", "vp", "department_head")
+LEVEL_RANK = {"executive": 0, "vp": 1, "department_head": 2}
+_C_ABBREV = re.compile(r"\bc(e|f|o|t|m|i|is|s|r|p|l|hr|c|a|d|b)o\b")
+_PLAIN_VP = re.compile(r"\b(vice president|vp)\b")
+_SENIOR_VP = re.compile(r"\b(svp|evp)\b")
+_HEAD = re.compile(r"\bhead\b")
+_DIRECTOR = re.compile(r"\b(director|general manager|gm)\b")
+_BOARD_WORDS = re.compile(r"\b(board|independent|non executive|lead director|chair\w*|trustee)\b")
+_NOT_CSUITE = re.compile(r"\bchief of staff\b|\beditor in chief\b|\bcommander in chief\b")
+_NON_JOB = re.compile(r"\b(founder|board|director|chair\w*|investor|advisor|adviser|"
+                      r"partner|member|trustee|owner)\b")
+
+
+def _level_text(title: str) -> str:
+    t = _ascii(title or "").lower().replace("-", " ")
+    t = re.sub(r"\b(senior|sr\.?) (vice president|vp)\b", "svp", t)
+    t = re.sub(r"\bexecutive (vice president|vp)\b", "evp", t)
+    return re.sub(r"\s+", " ", t)
+
+
+def leadership_level(title: str, label: str = "") -> str | None:
+    """Deterministic level of a title: 'executive' (C-level or President), 'vp'
+    (Vice President, SVP, EVP), 'department_head', or None (not a leadership role:
+    board-only, founder-only, Chief of Staff, ...).
+
+    A plain "Vice President and Chief X Officer" is VP rank. Director-level titles
+    (Director, Senior Director, General Manager) qualify as department heads only
+    when extraction found that the person leads a department or function
+    (`label == "department_head"`); "Head of ..." always does."""
+    t = _level_text(title)
+    if not t:
+        return None
+    if _PLAIN_VP.search(t):
+        return "vp"
+    csuite = re.sub(_NOT_CSUITE, " ", t)
+    if re.search(r"\bchief\b", csuite) or _C_ABBREV.search(csuite) or \
+            re.search(r"\bpresident\b", csuite):
+        return "executive"
+    if _SENIOR_VP.search(t):
+        return "vp"
+    if _HEAD.search(t):
+        return "department_head"
+    if _DIRECTOR.search(t) and not _BOARD_WORDS.search(t) and label == "department_head":
+        return "department_head"
+    return None
+
+
+def _is_other_job(title: str) -> bool:
+    """A non-leadership job title ("Solution Consultant"), as opposed to a board,
+    founder, or director-level title that can coexist with a leadership role."""
+    t = _level_text(title)
+    return bool(t) and leadership_level(title) is None and not _NON_JOB.search(t)
+
+
+# One-person roles: a newer source naming someone else in the role supersedes the claim.
+_SINGLE_ROLE_LONG = {
+    "chief executive officer": "ceo", "chief financial officer": "cfo",
+    "chief operating officer": "coo", "chief technology officer": "cto",
+    "chief marketing officer": "cmo", "chief information officer": "cio",
+    "chief information security officer": "ciso", "chief legal officer": "clo",
+    "general counsel": "general counsel",
+}
+_SINGLE_ROLES = set(_SINGLE_ROLE_LONG.values())
+_TITLE_FILLER = {"founder", "co founder", "cofounder", "chairman", "chair", "chairwoman",
+                 "chairperson", "president", "svp", "evp", "chairman of the board", ""}
+
+
+def single_holder_roles(title: str) -> set[str]:
+    """Company-wide one-person roles in a title: 'Co-founder / CTO' -> {'cto'}.
+    Scoped titles ('Crypto CFO', 'COO, Robinhood Financial') and Co-CEOs give none."""
+    t = _level_text(title)
+    for long_form, short in _SINGLE_ROLE_LONG.items():
+        t = t.replace(long_form, short)
+    parts = [p.strip() for p in re.split(r",|&|/|;|\+|\band\b", t)]
+    if any(p not in _SINGLE_ROLES and p not in _TITLE_FILLER for p in parts):
+        return set()
+    return {p for p in parts if p in _SINGLE_ROLES}
 
 
 def registrable_domain(url_or_host: str) -> str:
@@ -222,10 +307,9 @@ def _is_gov(url: str) -> bool:
 
 
 def source_tier(url: str, company_domain: str, source_type: str = "") -> int:
-    """1 = company's own domain (any subdomain), government filing, or a source the
-    evaluator classified official/regulatory; 2 = other accepted public sources."""
-    if (registrable_domain(url) == registrable_domain(company_domain) or _is_gov(url)
-            or source_type in OFFICIAL_TYPES):
+    """1 = company's own domain (any subdomain) or a government filing - decided by
+    the URL only, never by an LLM label; 2 = other accepted public sources."""
+    if registrable_domain(url) == registrable_domain(company_domain) or _is_gov(url):
         return 1
     return 2
 
@@ -266,7 +350,6 @@ def format_date(t: tuple[int, int, int]) -> str:
 
 # ---------------------------------------------------------------- resolution
 
-SENIORITY_RANK = {"executive": 0, "board": 1, "vp": 2, "department_head": 3, "other": 4}
 STALE_AFTER_DAYS = 730  # evidence older than this can't confirm a role is still current
 
 # resolver(cluster_a, cluster_b) -> (same_person, reason). Each cluster is a list
@@ -281,14 +364,51 @@ def _norm_title(t: str) -> str:
 def _record_date(r: dict, fetched: tuple[int, int, int]) -> tuple[int, int, int]:
     """Effective date of a record's evidence.
 
-    A live (non-article) page on the company's own site describes the present, so a
-    role it lists is evidence as of the fetch date - even if it mentions a start date
-    ("on our board since 2021"). Otherwise use the date the source states, if any."""
-    live_company_page = (registrable_domain(r["source_url"]) == r["_company"]
-                         and not _ARTICLE_PATH.search(urlparse(r["source_url"]).path))
-    if live_company_page and r.get("status") != "former":
+    Evidence of the present counts as of the fetch date, even without a stated date:
+    - a live (non-article) page on the company's own site ("on our board since 2021");
+    - a person's own public profile (the only person on that page) that presents the
+      role as current, e.g. a LinkedIn position "to present".
+    Otherwise use the date the source states, if any."""
+    if r.get("status") == "former":
+        return parse_date(r.get("as_of"))
+    if _is_live_company_page(r) or (r.get("_own_profile") and r.get("status") == "current"):
         return fetched
     return parse_date(r.get("as_of"))
+
+
+def _scope_of(title: str, other: str, company: str) -> bool:
+    """True if `other` is `title` plus a scope other than the company itself:
+    'President and COO' -> 'President and COO of TradePMR' (not '... of Robinhood')."""
+    base, longer = _norm_title(title), _norm_title(other)
+    if not base or not longer.startswith(base + " "):
+        return False
+    extra = set(longer[len(base):].split()) - {"of", "at", "by", "the", "for", "inc", "llc"}
+    if extra & _TITLE_WORDS:
+        return False  # more roles ("... Co-Founder and President"), not a scope
+    return bool(extra - {company.split(".")[0]})
+
+
+_TITLE_WORDS = {"and", "founder", "co", "cofounder", "president", "chairman", "chair", "ceo",
+                "officer", "chief", "director", "vp", "svp", "evp", "head", "secretary",
+                "treasurer", "manager", "partner", "member", "board"}
+
+
+def _is_own_profile(r: dict, parts: NameParts) -> bool:
+    """The person's own public profile (e.g. linkedin.com/in/jane-doe, janedoe.com),
+    not a company page or a post: the URL itself carries the person's name."""
+    if r.get("source_type") != "professional_profile":
+        return False
+    u = urlparse(r["source_url"])
+    if _ARTICLE_PATH.search(u.path):
+        return False
+    compact = re.sub(r"[^a-z]", "", (u.netloc + u.path).lower())
+    last = parts.last.replace(" ", "")
+    return last in compact and (parts.first in compact or len(last) >= 5)
+
+
+def _is_live_company_page(r: dict) -> bool:
+    return (registrable_domain(r["source_url"]) == r["_company"]
+            and not _ARTICLE_PATH.search(urlparse(r["source_url"]).path))
 
 
 def is_recent(d: tuple[int, int, int], fetched: tuple[int, int, int]) -> bool:
@@ -311,7 +431,9 @@ def _supersedes(former: dict, claim: dict) -> bool:
     of the same role when it is at least as new as that claim."""
     fa, ca = role_tokens(former["title"]), role_tokens(claim["title"])
     same_role = (_norm_title(former["title"]) == _norm_title(claim["title"])
-                 or (fa and fa <= ca))
+                 or (fa and fa <= ca)
+                 # "Chief Technology Officer" ended -> a "CTO" claim ended too
+                 or single_holder_roles(former["title"]) & single_holder_roles(claim["title"]))
     return bool(same_role) and former["date"] != (0, 0, 0) and former["date"] >= claim["date"]
 
 
@@ -324,14 +446,24 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
     Records may carry `status` ("current"/"former"/"unknown", from extraction; used
     only here, never stored), `source_type` (from source evaluation), `person_id`
     (existing DB id - the merged person keeps the lowest), `aliases`, and
-    `extra_sources` (supporting URLs without a title). People whose only roles are
-    former are excluded. `stats` gets checked/merged/failed/excluded_former counts."""
+    `extra_sources` (supporting URLs without a title). `stats` gets
+    checked/merged/failed/excluded_former counts and `excluded`: one
+    {name, title, reason, weak} entry per excluded person (`weak` = no official source)."""
     stats = stats if stats is not None else {}
-    stats.update(checked=0, merged=0, failed=0, excluded_former=0)
+    stats.update(checked=0, merged=0, failed=0, excluded_former=0, excluded=[])
     fetched = (fetched_on or date.today()).timetuple()[:3]
     company = registrable_domain(company_domain)
     at_company = re.compile(rf"\s+(at|@)\s+{re.escape(company_name)}\.?$", re.I) \
         if company_name else None
+
+    # A live company page naming ROSTER_MIN+ people is a current roster.
+    names_on: dict[str, set[str]] = {}
+    for rec in records:
+        parts = parse_name(rec.get("name") or "")
+        if parts and rec.get("source_url"):
+            names_on.setdefault(rec["source_url"], set()).add(parts.key)
+    has_roster = any(len(names) >= ROSTER_MIN and _is_live_company_page(
+        {"source_url": u, "_company": company}) for u, names in names_on.items())
 
     # --- Stage 1: clean records and group by exact normalized name.
     clusters: dict[str, list[dict]] = {}
@@ -343,6 +475,7 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
         if rec.get("source_type") == "people_data_aggregator":
             continue  # never evidence (defensive; such sources are filtered earlier)
         r = dict(rec)
+        r["_own_profile"] = _is_own_profile(r, parts)
         r["name"] = display_name(r["name"])
         r["title"] = (r.get("title") or "").strip()
         if at_company:
@@ -390,34 +523,119 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
     merged: dict[str, list[dict]] = {}
     for k, recs in clusters.items():
         merged.setdefault(find(k), []).extend(recs)
-    people = []
-    for recs in merged.values():
-        person = _consolidate(recs, fetched)
-        if person is None:
+
+    def exclude(recs: list[dict], reason: str) -> None:
+        if reason == REASON_FORMER:
             stats["excluded_former"] += 1
-            log(f"Excluded (only former roles): {recs[0]['name']}")
+        stats["excluded"].append({"name": recs[0]["name"], "title": recs[0]["title"],
+                                  "reason": reason, "weak": all(r["tier"] > 1 for r in recs)})
+        log(f"Excluded {recs[0]['name']}: {reason}")
+
+    built: list[tuple[list[dict], dict]] = []
+    for recs in merged.values():
+        person, reason = _consolidate(recs, fetched)
+        if person is None:
+            exclude(recs, reason)
+        elif has_roster and not person["_on_live_page"] and not is_recent(person["_date"], fetched):
+            exclude(recs, REASON_NOT_ON_ROSTER)
         else:
-            people.append(person)
+            built.append((recs, person))
+
+    # --- Stage 3: one-person roles (CEO, CTO, ...) claimed by different people.
+    holders: dict[str, list[int]] = {}
+    for i, (_, p) in enumerate(built):
+        for role in p["_single_roles"]:
+            holders.setdefault(role, []).append(i)
+    dropped: set[int] = set()
+    for role, idx in holders.items():
+        idx = [i for i in idx if i not in dropped]
+        if len(idx) < 2:
+            continue
+        idx.sort(key=lambda i: built[i][1]["_single_roles"][role], reverse=True)
+        top, second = (built[i][1]["_single_roles"][role] for i in idx[:2])
+        decided = top > second and (second != (0, 0, 0) or is_recent(top, fetched))
+        label = role.upper() if role != "general counsel" else "General Counsel"
+        if not decided:
+            names = ", ".join(built[i][1]["name"] for i in idx)
+            for i in idx:
+                built[i][1]["conflict"] = f"Sources disagree on who is {label}: {names}"
+            log(f"Unresolved: several people listed as {label} ({names})")
+            continue
+        winner = built[idx[0]][1]
+        for i in idx[1:]:
+            recs = [r for r in built[i][0] if role not in single_holder_roles(r["title"])]
+            person, reason = _consolidate(recs, fetched) if recs else (None, "")
+            if person is None:
+                exclude(built[i][0], f"{label} role superseded: {winner['name']} is listed "
+                                     f"as {label} in newer evidence")
+                dropped.add(i)
+            else:
+                built[i] = (recs, person)
+                log(f"{built[i][1]['name']}: {label} claim superseded by {winner['name']}")
+
+    people = []
+    for i, (_, p) in enumerate(built):
+        if i not in dropped:
+            people.append({k: v for k, v in p.items() if not k.startswith("_")})
     return people
 
 
-def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> dict | None:
-    """Build one person from all their records, or None if every role is former."""
+ROSTER_MIN = 3  # people listed on a live company page for it to count as a roster
+REASON_FORMER = "only former roles"
+REASON_NO_LEADERSHIP = "no qualifying leadership title (board-only, founder-only, or other role)"
+REASON_NOT_ON_ROSTER = ("not on the company's current leadership pages, and no recent "
+                        "evidence of the role")
+
+
+def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> tuple[dict | None, str]:
+    """Build one person from all their records, or (None, reason) if they hold no
+    current leadership role."""
     formers = [r for r in recs if r["status"] == "former"]
     # Outdated roles are dropped, not stored: explicit "former" records, and current
     # claims of a role that an equally new or newer source says has ended.
     active = [r for r in recs if r["status"] != "former"
               and not any(_supersedes(f, r) for f in formers)]
     if not active:
-        return None
+        return None, REASON_FORMER
+    for r in active:
+        r["level"] = leadership_level(r["title"], r.get("seniority") or "")
+    qualifying = [r for r in active if r["level"]]
+    if not qualifying:
+        return None, REASON_NO_LEADERSHIP
 
     def rank(r: dict):
         return (r["tier"], tuple(-x for x in r["date"]),
                 0 if r["status"] == "current" else 1,
-                SENIORITY_RANK.get(r.get("seniority"), 4), -len(r["title"]))
+                LEVEL_RANK[r["level"]], -len(r["title"]))
 
-    active.sort(key=rank)
-    best = active[0]
+    qualifying.sort(key=rank)
+    best = qualifying[0]
+    # The same title with an added scope ("President and COO" vs. "President and COO of
+    # TradePMR by Robinhood") is the same role stated more precisely: show the precise
+    # one, dated by the newer of the two sources.
+    scoped = [r for r in qualifying if _scope_of(best["title"], r["title"], r["_company"])]
+    date_ = best["date"]
+    if scoped:
+        precise = min(scoped, key=rank)
+        date_ = max(best["date"], precise["date"])
+        best = precise
+    active.sort(key=lambda r: r is not best)
+
+    # A current non-leadership job title in an equally new or newer source
+    # (e.g. profile headline "Solution Consultant" vs. "Head of ...") is a discrepancy.
+    conflict = ""
+    contra = next((r for r in active if r["status"] == "current" and r["date"] >= best["date"]
+                   and _is_other_job(r["title"])), None)
+    if contra:
+        conflict = (f'Sources disagree: also listed as "{contra["title"]}" '
+                    f'({contra["source_url"]})')
+
+    single: dict[str, tuple[int, int, int]] = {}
+    for r in qualifying:
+        if any(_scope_of(r["title"], o["title"], o["_company"]) for o in qualifying):
+            continue  # a scoped version of this title exists: not a company-wide role
+        for role in single_holder_roles(r["title"]):
+            single[role] = max(single.get(role, (0, 0, 0)), r["date"])
 
     # Canonical spelling: the name the company itself uses, then filings, then other
     # sources; within a level, the most frequently used spelling. Spellings from
@@ -447,21 +665,34 @@ def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> dict | None
             "source_type": r.get("source_type") or "",
             "evidence": r.get("evidence") or "", "is_current_title": r is best,
         })
+    # Evidence that a role ended is kept (hidden) so re-checking stored data later
+    # still cancels the older claims; it is never shown as a role.
+    ended = [{"name": r["name"], "title": r["title"],
+              "as_of": format_date(parse_date(r.get("as_of"))),
+              "source_url": r["source_url"], "source_tier": r["tier"],
+              "source_type": r.get("source_type") or "", "evidence": r.get("evidence") or ""}
+             for r in formers if r["date"] != (0, 0, 0)]
 
     return {
         "id": min((r["person_id"] for r in recs if r.get("person_id")), default=None),
         "name": canonical,
         "aliases": sorted(n for n in all_names if n != canonical),
         "title": best["title"],
-        "as_of": format_date(best["date"]),  # effective evidence date (internal)
-        "may_be_outdated": not is_recent(best["date"], fetched),
+        "as_of": format_date(date_),  # effective evidence date (internal)
+        "may_be_outdated": not is_recent(date_, fetched),
+        "conflict": conflict,
         "department": best.get("department") or next(
             (r["department"] for r in active if r.get("department")), ""),
-        "seniority": best.get("seniority") or "other",
+        "seniority": best["level"],
         "source_url": best["source_url"],
         "source_urls": list(dict.fromkeys(
             [r["source_url"] for r in active] + [u for r in active
                                                  for u in r.get("extra_sources") or []])),
         "evidence": best.get("evidence") or "",
         "roles": roles,
-    }
+        "ended": ended,
+        # internal, used by resolve_people and stripped from the result
+        "_date": date_,
+        "_on_live_page": any(_is_live_company_page(r) for r in active),
+        "_single_roles": single,
+    }, ""

@@ -92,13 +92,9 @@ with st.expander(f"Leadership ({len(leaders)} people)", expanded=not leaders or 
             hide_index=True,
             width="stretch",
         )
+        for note in views.disagreements(leaders):
+            st.warning(f"Unresolved: {note}")
         roles = db.get_role_history(company_id)
-        if roles:
-            with st.popover("Supporting evidence"):
-                st.dataframe(pd.DataFrame(views.evidence_rows(roles),
-                                          columns=views.EVIDENCE_COLUMNS),
-                             hide_index=True, width="stretch",
-                             column_config={"Source": st.column_config.LinkColumn("Source")})
     else:
         st.warning(
             "No leaders found. The site may render its team page with JavaScript, "

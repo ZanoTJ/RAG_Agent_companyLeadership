@@ -1,0 +1,2256 @@
+
+● Everything is implemented and working end to end. All 72 offline tests pass,
+  the Campfire and Robinhood re-collections ran live, all 7 of your questions
+  were answered with clickable sources, and the UI renders all four companies
+  without errors. Nothing is committed.
+
+  Source quality
+  - No domain blocklist. A new source_policy.py checks every page before
+    extraction and storage, using the final URL after any redirect:
+    - Fixed checks with no API calls: empty pages, login walls, the company's
+      own domain, .gov filings, and contact-data patterns like email formats and
+      phone numbers.
+    - Gemini, in batches, only for unclear pages. It labels each one (news,
+      reference, public profile, data broker…) and says whether it's credible.
+  - What it did on live data: rejected RocketReach, ZoomInfo, Clay, VectorShift,
+    Exa's directory, Comparably and CB Insights; rejected pages about other
+    companies named "Campfire"; accepted public LinkedIn and news pages.
+  - Collection also gets these fixes:
+    - People quoted in customer testimonials are excluded. A customer's "Head of
+      Finance" had been extracted as a Campfire leader.
+    - Gemini overload errors (503) are now retried with a short wait.
+    - Sources are stored as relevant passages instead of whole pages.
+
+  Outdated roles and the database
+  - Former roles are no longer stored. If a credible source at least as new as
+    the claim says a person left a role, the role is dropped. People with only
+    former roles are excluded.
+  - "(may be outdated)" is added unless the title is backed by a live company
+    page or a source from the last 2 years.
+  - The status columns are gone. The migration made an automatic backup first,
+    is safe to re-run, and keeps every key and relationship. I also made a
+    manual backup. Both are in backups/, which is now gitignored.
+
+  UI: the people table shows Name, Also known as, Title, Department, Seniority,
+  Source (clickable), More sources, plus a "Supporting evidence" popover. IDs,
+  status and dates are hidden. I also fixed a company-dropdown bug that
+  sometimes showed the previously selected company.
+
+  Hybrid answering (rag.py):
+  - Counts are computed in Python. The person a question is about is found in
+    Python by name, alias or role.
+  - The answer uses stored passages first. Only if they're insufficient does it
+    run one targeted, filtered web search, cached for 7 days.
+  - Invented links and internal IDs are removed from answers.
+  - If search is down, it answers from the collected data and says the details
+    couldn't be checked.
+
+  Live results
+
+  ┌────────────────┬───────────────────┬───────────────────────────────────┐
+  │    Question    │    How it was     │              Answer               │
+  │                │     answered      │                                   │
+  ├────────────────┼───────────────────┼───────────────────────────────────┤
+  │ Campfire CEO   │ Database          │ John Glasgow                      │
+  ├────────────────┼───────────────────┼───────────────────────────────────┤
+  │ Campfire CEO   │ Web search        │ San Francisco                     │
+  │ based          │                   │                                   │
+  ├────────────────┼───────────────────┼───────────────────────────────────┤
+  │ Robinhood CEO  │ Database          │ Vlad Tenev (also written as       │
+  │                │                   │ Vladimir Tenev)                   │
+  ├────────────────┼───────────────────┼───────────────────────────────────┤
+  │ VPs at         │ Computed count    │ 12 listed                         │
+  │ Robinhood      │                   │                                   │
+  ├────────────────┼───────────────────┼───────────────────────────────────┤
+  │ Robinhood CEO  │ Web search, then  │ Menlo Park, "professionally       │
+  │ based          │ cached on repeat  │ based"                            │
+  ├────────────────┼───────────────────┼───────────────────────────────────┤
+  │ NVIDIA CEO     │ Web search        │ LSI Logic, AMD; Oregon State,     │
+  │ background     │                   │ Stanford (NVIDIA's official bio)  │
+  ├────────────────┼───────────────────┼───────────────────────────────────┤
+  │ Robinhood      │ Database          │ Deepak Rao and Carley Olivas      │
+  │ marketing      │                   │                                   │
+  └────────────────┴───────────────────┴───────────────────────────────────┘
+
+  Data now: Campfire 4 people, Robinhood 45, Anthropic 16 (unchanged), NVIDIA 7.
+  NVIDIA lost 40 people whose only evidence was data-broker sites. The app
+  shows a notice suggesting a re-collection, which I didn't run because you only
+  approved Campfire and Robinhood.
+
+  API usage: I collected Campfire three times. The second run was to fix the
+  testimonial bug; the third because Gemini overload errors had dropped two
+  pages, which led to the retry fix. Robinhood was collected once, before the
+  retry fix, so two of its pages failed. Its board members were still found on
+  another official page.
+
+  Remaining limitations
+  - Runs vary: Tavily results and Gemini judgments change between collections.
+    For example, Chris McDonough's LinkedIn page wasn't found in the last
+    Campfire run.
+  - Dropped from a roster isn't detected: someone who simply disappears from a
+    newer filing stays listed with "(may be outdated)". Examples: two directors
+    from Robinhood's 2022 proxy.
+  - Dates are best-effort, and the source classifier is a Gemini judgment. A
+    wrong rejection loses evidence; it never invents a record.
+
+> <ide_opened_file>The user opened the file c:\OneDrive\OneDrive - California
+  State University, Sacramento\Desktop\Work\Volt\project_Company Leadership RAG
+  Agent\.env in the IDE. This may or may not be related to the current
+  task.</ide_opened_file>
+
+> Inspect the existing leadership discovery, extraction, verification, and
+  role-classification pipeline.
+
+  Our SQLite database currently contains 44 leaders for Robinhood and 5 for
+  Campfire.
+
+  The assignment defines leadership strictly as C-level executives, Vice
+  Presidents (including SVPs), and Heads of departments.
+
+  Investigate:
+
+  1. Why Robinhood includes 11 board members and several executives whose
+  titles may not qualify.
+  2. Whether historical roles from old SEC filings and announcements are
+  incorrectly being treated as current.
+  3. Why Campfire has only 5 verified leaders. Determine whether additional
+  candidates were never discovered or were rejected by the verification
+  pipeline.
+  4. Whether meetcampfire.com correctly resolves to the same company as
+  campfire.ai.
+  5. Whether the system can distinguish current and historical CTOs when
+  sources disagree.
+  6. Whether VP counting is deterministic and based on unique verified
+  individuals.
+  7. Check if there are missing leadership at campfire.ai such as Erik Leavell,
+  Hank Sun, Irina Silva, Jack Arrix, and Paul C Nichols.&#x20;
+
+  Requirements:
+
+  - Prioritize authoritative sources.
+  - Do not add people solely to increase the count.
+  - Do not infer current employment from old announcements.
+  - Do not classify board-only members as operational leaders.
+  - Preserve evidence and source URLs for each person.
+  - Report how many candidates were discovered, rejected, and accepted,
+  including reasons.
+  - Keep the implementation lean.
+
+  First inspect the existing code and database, identify specific root causes,
+  and propose minimal changes. Do not modify the implementation until I review
+  the findings.
+  ⎿  Read README.md (131 lines)
+  ⎿  Read app.py (127 lines)
+  ⎿  Referenced file rag.py
+  ⎿  Referenced file tests\test_sources_and_retrieval.py
+  ⎿  Read tests\test_name_variants.py (234 lines)
+
+● Compacted using a summary written while you were away · turn off with
+  "idleCompaction": false in settings.json
+
+● I'll start with the database, then trace the code paths that produced it.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The user re-collected all three today. Here are the current leaders for
+  Campfire and Robinhood:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Several patterns already stand out, including a LinkedIn company page cited
+  for six people with no date. Next, the per-person evidence:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now Campfire's evidence and stored sources:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Two Campfire sources look wrong: campfire-interactive.com and thecampfire.ai
+  are stored as official. Let me check what the LinkedIn company page and those
+  two pages actually contain:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The meetcampfire LinkedIn page lists Paul C Nichols as CTO, conflicting with
+  the stored CTO, Fernando San Martin, though extraction missed it because a
+  chat search cached it. I'm now checking the source policy to see why the other
+  two companies were marked official. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The rules only treat a page as official when it sits on the company's own
+  domain, yet Gemini tagged thecampfire.ai and campfire-interactive.com as
+  official and the code trusted that tag. I'm checking rag.py next. · summary
+
+  Ran 7 shell commands (ctrl+o to expand)
+
+● Next: how the company identity is stored, and what meetcampfire.com resolves
+  to.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● meetcampfire.com redirects to campfire.ai, so both inputs share one record.
+  I'm running a write-free dry run of the Campfire collection, plus one targeted
+  search for each of your five names. · summary
+
+  Made 1 scratchpad edit +86, ran 1 shell command (ctrl+o to expand)
+
+● While that runs, here's how counts reach the chat:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● The dry run is still going; its output only appears at the end. I'll wait for
+  it to finish.
+
+● Monitor(Campfire dry run completion)
+  ⎿  Monitor started · task bwluvv06f · timeout 1800s
+
+● I'm waiting for the dry run to finish. I'll report once its results are in.
+
+● Background command "Run the Campfire dry run without database writes"
+completed (exit code 0)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The database is unchanged (same checksum). The crawler fetched only 3 Campfire
+  pages and none was a team page. Here's the full funnel:
+  Ran 1 shell command (ctrl+o to expand)
+
+● Monitor "Campfire dry run completion" stream ended
+
+● Brendan Doyle's as_of date of September 18, 2026 came from the February 2024
+  launch post, which links to a different article, so the 2024 claim looks
+  current. I'm running the five name searches next. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The name searches answer question 7. Two more checks on Robinhood: whether the
+  six LinkedIn-only people and the older-filing people appear on any current
+  official page.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I've inspected the code and the database and changed no code. The database
+  checksum is unchanged and the 72 tests still pass. To test question 3 I ran a
+  dry run of the Campfire collection that wrote nothing to the database. It made
+  about 11 Tavily searches, including one per name for the five people you
+  listed, and about 30 Gemini calls.
+
+  Findings
+
+  1. Why Robinhood has board members and non-qualifying titles. All 44 people,
+  by why they're there:
+
+  People: Board-only members
+  Count: 11
+  Why they're kept: Extraction asks for board members, and nothing removes
+  people
+    who only sit on the board
+  ────────────────────────────────────────
+  People: From the LinkedIn company page's "Leadership" box (R. Scott Victoria,
+    Roger Younan, Sanjay Kotte, Alisa Bergman, Patrick Chan, Joshua Topolsky)
+  Count: 6
+  Why they're kept: Undated, self-reported, and absent from Robinhood's current
+    leadership page. They're kept as "(may be outdated)"
+  ────────────────────────────────────────
+  People: Titles that don't meet your definition (Taylor Brown, Chief of Staff;
+    Carley Olivas and Nora Chan, Senior Directors)
+  Count: 3
+  Why they're kept: Gemini labels the level of each record, and nothing checks
+    the title itself. Its instructions count "directors who lead a function"
+  ────────────────────────────────────────
+  People: Directors whose title is their job at another company (Scott Sandell:
+    "Managing General Partner, New Enterprise Associates")
+  Count: —
+  Why they're kept: SEC proxy tables list each director's main job elsewhere,
+  and
+    extraction stores it as a Robinhood title. Dara Treseder also has a stored
+    "SVP … Peloton" record that could make her look like a VP
+
+  2. Old filings and announcements treated as current: yes, five people.
+  - Who: Frances Frei (2023 proxy), Scott Sandell (2022 proxy), Christina Lai
+    (2023 proxy; Lucas Moskowitz is now Corporate Secretary), Norm Ashkenas and
+    Kelly Zigaitis (a 2020 "will serve as" announcement).
+  - None is on any current official investor page. The system only removes a
+    role when a source explicitly says "former". Simply missing from today's
+    roster never removes anyone.
+  - Dates mean two things. as_of holds whatever date Gemini attaches to the
+    role. Often that's a start date ("director since 2016") rather than the date
+    of the source.
+  - Some dates are wrong. The dry run gave Brendan Doyle 2026-09-18 from
+    Campfire's February 2024 launch post. That date belongs to another post
+    linked on the page, so a 2024 claim looked current.
+
+  3. Why Campfire has only 5: most candidates were never discovered, not
+  rejected. In the dry run:
+  - 27 pages found: 3 from crawling the site, 24 from search.
+    - The crawler never reached a team page, and it deliberately skips /blog.
+    - The 6 search queries are about the company as a whole, return 5 results
+      each, and "Campfire" is a common name.
+  - 9 pages rejected:
+    - RocketReach ×4 and CB Insights (people-data sites);
+    - Campfire Capital and Camp Fire (other organizations);
+    - one Campfire Interactive press release;
+    - one Yahoo page with no readable content.
+  - 18 pages accepted, but 4 were about other companies.
+    - These were thecampfire.ai (a Brussels agency), plus two Yahoo articles and
+      a LinkedIn post about Campfire Interactive.
+    - Extraction correctly found nothing on them. But the source check has no
+      "is this the same company?" question.
+    - Gemini labeled thecampfire.ai "official". The current database stores it
+      and campfire-interactive.com as official too, so the chat can read them.
+  - 17 people records extracted, 2 rejected ("founding team member" isn't a
+    role), 15 accepted → 5 unique people. None of the five names you listed
+    appeared on any page that was found.
+
+  4. meetcampfire.com vs campfire.ai: handled correctly. meetcampfire.com
+  redirects to https://campfire.ai/, and the company is stored under that final
+  URL, so both inputs map to the same company.
+
+  5. Current vs. former CTO: the system can't tell them apart.
+  - The evidence shows Paul C Nichols is the current CTO:
+    - Campfire's own blog (the Claude announcement) says "engineering team … led
+      by CTO Paul Nichols";
+    - a Campfire LinkedIn post: "Paul C Nichols joins us as CTO" (about
+      mid-2024);
+    - his own LinkedIn profile and personal website.
+  - Fernando San Martin's "Co-founder / CTO" comes only from the February 2024
+    launch post.
+  - Two gaps:
+    - Discovery never found Paul's sources. The LinkedIn company page that lists
+      him was cached later by a chat web search, which never feeds extraction.
+    - Each person is judged on their own, so nothing notices two people holding
+      the same one-person role. If both were found, both would show as CTO.
+
+  6. VP counting.
+  - It is deterministic for a given database and counts unique people.
+  - It relies on Gemini's level label rather than the title, so it can change
+    between collections.
+  - The current Robinhood count is 14 and is wrong both ways:
+    - it includes Christina Lai (2023, replaced);
+    - it leaves out Matt Billings, whose official title is "Vice President,
+      Brokerage and President…" but whose label is "executive".
+
+  7. The five Campfire names:
+
+  Person: Paul C Nichols
+  Best evidence found: Campfire blog, LinkedIn announcement, his profile
+  Verdict: Should be included, as CTO
+  ────────────────────────────────────────
+  Person: Jack Arrix
+  Best evidence found: Public LinkedIn profile ("Head of Partnerships") and a
+    public post
+  Verdict: Qualifies, from his own profile only
+  ────────────────────────────────────────
+  Person: Irina Silva
+  Best evidence found: LinkedIn "Head of Field Marketing". theorg.com says the
+    same but was rightly rejected as a people-data site
+  Verdict: Qualifies, from her own profile only. Its headline still names Seqera
+
+    Labs
+  ────────────────────────────────────────
+  Person: Hank Sun
+  Best evidence found: Profile title says "Head of Solution Consulting", but the
+
+    listed current role is "Founding Solution Consultant" and Campfire's welcome
+
+    post says "Solution Consultant"
+  Verdict: Weak, the sources disagree
+  ────────────────────────────────────────
+  Person: Erik Leavell
+  Best evidence found: Campfire's own customer page calls him "Head of Finance
+  at
+    April" (a customer). His LinkedIn shows Campfire as employer but gives no
+    title
+  Verdict: Exclude: there's no evidence of a leadership title at Campfire
+
+  Proposed changes
+
+  1. Decide the level from the title, in code.
+     - Add a small classifier in entities.py:
+       - C-level: Chief … Officer, CEO, CTO and similar, or President;
+       - VP: VP, SVP, EVP, Vice President;
+       - Head of a department: "Head of …".
+     - Use the person's highest qualifying current title.
+     - Exclude people with no qualifying title and record why: board-only,
+       Co-Founder alone, Chief of Staff, Senior Director.
+     - Counts then come from this instead of Gemini's label, which fixes both VP
+       errors.
+  2. Use the source's date, not the role's start date.
+     - as_of becomes the page's publication or filing date, and the role start
+       date is used only when there isn't one.
+     - A date later than the page's own publication date is discarded.
+     - The extraction instructions will also say that a director's main job at
+       another organization is not a role at this company.
+  3. Respect the current official roster.
+     - A "roster" is a live, non-article page on the company's site that lists
+       at least 3 people.
+     - If the company has one, a person who appears on no live company page and
+       has no evidence from the last 2 years is excluded, with the reason "not
+       on the current official roster".
+     - This removes Frei, Sandell, Lai, Ashkenas, Zigaitis and the six
+       LinkedIn-box people.
+     - Companies without a roster (Campfire) keep today's "(may be outdated)"
+       behaviour.
+  4. Resolve conflicts over one-person roles.
+     - Applies to plain titles such as CEO, CFO, CTO, COO and General Counsel.
+       Not to "Co-CEO", "Crypto CFO" or "CFO, Robinhood Financial".
+     - If two people claim one, the newer dated claim wins and the older one is
+       dropped.
+     - If it can't be decided, both are flagged and the chat is told the sources
+       disagree.
+  5. Source check fixes.
+     - Add a "same company?" answer to Gemini's source check, so pages about
+       other companies are rejected before storage.
+     - Only the code may label a source official (own domain) or a filing
+       (.gov). Gemini can no longer assign those top-trust labels, which also
+       demotes stocktitan's copy of the proxy.
+  6. Discovery, about one extra Tavily call per collection.
+     - Change the query that only searches the company's own site to use role
+       words (CTO, VP, "head of"). That would have found the blog post naming
+       Paul as CTO.
+     - Add one LinkedIn-restricted query, which should surface the company page
+       and some individual profiles. It isn't guaranteed to find all five.
+  7. A collection report.
+     - Each collection records its counts: pages found, rejected and accepted;
+       records extracted and rejected; people excluded at the final step; and
+       the reasons for each.
+     - Stored as one JSON column on companies and shown in a UI expander.
+  8. Tests for each rule, built from the cases above.
+
+  Likely results after re-collecting:
+  - Robinhood: about 21 people (8 C-level, 13 VPs). That assumes Senior
+    Directors are excluded and subsidiary "President" counts as C-level.
+  - Campfire: John Glasgow, Paul C Nichols (CTO), Alexandra Roveda, Chris
+    McDonough and Brendan Doyle, the last flagged "(may be outdated)". Fernando
+    San Martin would be dropped as the former CTO. Jack Arrix and Irina Silva
+    would be added only if search finds them and you accept item 3 below.
+
+  Decisions I need from you:
+  1. Board members: don't store them at all (recommended, simplest), or keep a
+     separate board list that's excluded from leadership counts?
+  2. Senior Directors on the official leadership page (Carley Olivas, Nora
+     Chan): exclude them under your strict definition (recommended), or keep
+     them?
+  3. People whose only evidence is their own undated LinkedIn profile (Jack
+     Arrix, Irina Silva): include them labeled "(may be outdated)", or require a
+     second, independent source? I lean towards including them with the label;
+     conflicting cases like Hank Sun would then be judged on their exact title
+     wording.
+  4. Re-collecting: after the changes, may I re-collect Campfire and Robinhood
+     again (about 7 Tavily calls and roughly 30–60 Gemini calls each)?
+
+  The dry-run script and its full output are in the scratchpad:
+  - C:\Users\nabae\AppData\Local\Temp\claude\80d0ef42de8d6d3d\fda61ead-6204-4a16
+    -a364-89a33233d004\scratchpad\dryrun_campfire.py
+  - C:\Users\nabae\AppData\Local\Temp\claude\80d0ef42de8d6d3d\fda61ead-6204-4a16
+    -a364-89a33233d004\scratchpad\dryrun_campfire.json
+
+> <ide_selection>The user selected the lines 7 to 7 from c:\OneDrive\OneDrive -
+  California State University, Sacramento\Desktop\Work\Volt\project_Company
+  Leadership RAG Agent\entities.py:
+  c
+
+  This may or may not be related to the current task.</ide_selection>
+
+> Please proceed with the proposed changes based on the following decisions:
+
+  1. Board members
+
+  Only include C-level executives (CEO, CTO, CFO, CMO, etc.), Vice Presidents
+  (including SVPs and EVPs), and Heads of departments.
+
+  2. Senior Directors
+
+  Keep Senior Directors such as Carley Olivas and Nora Chan if they actually
+  lead a department or function, as supported by their official titles or other
+  reliable evidence.
+
+  Do not automatically include every Senior Director. The key distinction is
+  whether the individual has a department-head responsibility.
+
+  3. LinkedIn profiles
+
+  Include people whose current LinkedIn profiles explicitly show a qualifying
+  leadership position at the target company, even if there is no publication
+  date.
+
+  Do not automatically label these profiles "(may be outdated)" simply because
+  LinkedIn does not display a date. An explicitly listed current position
+  should count as current evidence.
+
+  However, continue searching for additional independent public sources to
+  corroborate their roles whenever possible.
+
+  If reliable sources contradict the LinkedIn information, investigate the
+  conflict and flag unresolved discrepancies rather than automatically
+  accepting either source.
+
+  4. Re-collection
+
+  Yes, you may re-collect data, but only for Campfire (meetcampfire.com /
+  campfire.ai) and Robinhood (robinhood.com).
+
+  Please implement the proposed improvements, add appropriate tests, and run
+  the collections again.
+
+● I'll implement the changes now. First, the code that each one touches:
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● I'm starting on entities.py now, setting leadership levels from titles and
+  resolving conflicts between sources. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now the edits to entities.py: the module docstring, tiers by domain only, and
+  the new level and role-conflict helpers.
+
+● Update(entities.py)
+  ⎿  Added 11 lines, removed 6 lines
+      12  the resolver confirms they are the same person. With no resolve
+          r, or on any
+      13  error, they stay separate: a similar name alone never merges tw
+          o people.
+      14  
+      15 -Each resulting person keeps every alias and supporting source. 
+         -Outdated roles are                                             
+      16 -not stored: a role is dropped when a credible source says it ha
+         -s ended (and that                                              
+      17 -source is at least as new as the claim); people with only forme
+         -r roles are                                                    
+      18 -excluded. The current title is chosen by source authority first
+         -, then recency, and                                            
+      19 -is flagged "may be outdated" unless backed by a live company pa
+         -ge or a source dated                                           
+      20 -within STALE_AFTER_DAYS. No status is stored; freshness is comp
+         -uted from dates.                                               
+      15 +Each resulting person keeps every alias and supporting source. 
+         +Only leadership                                                
+      16 +roles count (C-level, VP/SVP/EVP, head of a department - see le
+         +adership_level);                                               
+      17 +board-only members and other titles are excluded. Outdated role
+         +s are not stored:                                              
+      18 +a role is dropped when a credible source says it has ended or a
+         + newer source names                                            
+      19 +someone else in the same one-person role (e.g. CTO); people lef
+         +t without a current                                            
+      20 +leadership role are excluded, and so are people missing from th
+         +e company's current                                            
+      21 +roster pages whose evidence is old. The current title is chosen
+         + by source authority                                           
+      22 +first, then recency, and is flagged "may be outdated" unless ba
+         +cked by current                                                
+      23 +evidence: a live company page, the person's own profile listing
+         + it as current, or a                                           
+      24 +source dated within STALE_AFTER_DAYS. Disagreeing sources are f
+         +lagged, not hidden.                                            
+      25 +No status is stored; freshness is computed from dates.         
+      26  
+      27  This module makes no network calls; the resolver is injected (s
+          ee rag.py).
+      28  """
+
+● Update(entities.py)
+  ⎿  Added 81 lines, removed 1 line
+      208      r"/(blog|news|newsroom|press|press-releases?|articles?|pos
+           ts?|stories|insights|"
+      209      r"announcements?|media)(/|$)", re.I)
+      210  TIER_LABEL = {1: "Official / filing", 2: "News / reference / p
+           rofile"}
+      211 -RESOLUTION_VERSION = 3  # bump when resolution logic changes; 
+          -stored data is re-resolved                                    
+      211 +RESOLUTION_VERSION = 4  # bump when resolution logic changes; 
+          +stored data is re-resolved                                    
+      212  OFFICIAL_TYPES = {"official", "regulatory"}
+      213  
+      214 +# ------------------------------------------------------------
+          +---- leadership level                                         
+      215  
+      216 +LEVELS = ("executive", "vp", "department_head")               
+      217 +LEVEL_RANK = {"executive": 0, "vp": 1, "department_head": 2}  
+      218 +_C_ABBREV = re.compile(r"\bc(e|f|o|t|m|i|is|s|r|p|l|hr|c|a|d|b
+          +)o\b")                                                        
+      219 +_PLAIN_VP = re.compile(r"\b(vice president|vp)\b")            
+      220 +_SENIOR_VP = re.compile(r"\b(svp|evp)\b")                     
+      221 +_HEAD = re.compile(r"\bhead\b")                               
+      222 +_DIRECTOR = re.compile(r"\b(director|general manager|gm)\b")  
+      223 +_BOARD_WORDS = re.compile(r"\b(board|independent|non executive
+          +|lead director|chair\w*|trustee)\b")                          
+      224 +_NOT_CSUITE = re.compile(r"\bchief of staff\b|\beditor in chie
+          +f\b|\bcommander in chief\b")                                  
+      225 +_NON_JOB = re.compile(r"\b(founder|board|director|chair\w*|inv
+          +estor|advisor|adviser|"                                       
+      226 +                      r"partner|member|trustee|owner)\b")     
+      227 +                                                              
+      228 +                                                              
+      229 +def _level_text(title: str) -> str:                           
+      230 +    t = _ascii(title or "").lower().replace("-", " ")         
+      231 +    t = re.sub(r"\b(senior|sr\.?) (vice president|vp)\b", "svp
+          +", t)                                                         
+      232 +    t = re.sub(r"\bexecutive (vice president|vp)\b", "evp", t)
+      233 +    return re.sub(r"\s+", " ", t)                             
+      234 +                                                              
+      235 +                                                              
+      236 +def leadership_level(title: str, label: str = "") -> str | Non
+          +e:                                                            
+      237 +    """Deterministic level of a title: 'executive' (C-level or
+          + President), 'vp'                                             
+      238 +    (Vice President, SVP, EVP), 'department_head', or None (no
+          +t a leadership role:                                          
+      239 +    board-only, founder-only, Chief of Staff, ...).           
+      240 +                                                              
+      241 +    A plain "Vice President and Chief X Officer" is VP rank. D
+          +irector-level titles                                          
+      242 +    (Director, Senior Director, General Manager) qualify as de
+          +partment heads only                                           
+      243 +    when extraction found that the person leads a department o
+          +r function                                                    
+      244 +    (`label == "department_head"`); "Head of ..." always does.
+          +"""                                                           
+      245 +    t = _level_text(title)                                    
+      246 +    if not t:                                                 
+      247 +        return None                                           
+      248 +    if _PLAIN_VP.search(t):                                   
+      249 +        return "vp"                                           
+      250 +    csuite = re.sub(_NOT_CSUITE, " ", t)                      
+      251 +    if re.search(r"\bchief\b", csuite) or _C_ABBREV.search(csu
+          +ite) or \                                                     
+      252 +            re.search(r"\bpresident\b", csuite):              
+      253 +        return "executive"                                    
+      254 +    if _SENIOR_VP.search(t):                                  
+      255 +        return "vp"                                           
+      256 +    if _HEAD.search(t):                                       
+      257 +        return "department_head"                              
+      258 +    if _DIRECTOR.search(t) and not _BOARD_WORDS.search(t) and 
+          +label == "department_head":                                   
+      259 +        return "department_head"                              
+      260 +    return None                                               
+      261 +                                                              
+      262 +                                                              
+      263 +def _is_other_job(title: str) -> bool:                        
+      264 +    """A non-leadership job title ("Solution Consultant"), as 
+          +opposed to a board,                                           
+      265 +    founder, or director-level title that can coexist with a l
+          +eadership role."""                                            
+      266 +    t = _level_text(title)                                    
+      267 +    return bool(t) and leadership_level(title) is None and not
+          + _NON_JOB.search(t)                                           
+      268 +                                                              
+      269 +                                                              
+      270 +# One-person roles: a newer source naming someone else in the 
+          +role supersedes the claim.                                    
+      271 +_SINGLE_ROLE_LONG = {                                         
+      272 +    "chief executive officer": "ceo", "chief financial officer
+          +": "cfo",                                                     
+      273 +    "chief operating officer": "coo", "chief technology office
+          +r": "cto",                                                    
+      274 +    "chief marketing officer": "cmo", "chief information offic
+          +er": "cio",                                                   
+      275 +    "chief information security officer": "ciso", "chief legal
+          + officer": "clo",                                             
+      276 +    "general counsel": "general counsel",                     
+      277 +}                                                             
+      278 +_SINGLE_ROLES = set(_SINGLE_ROLE_LONG.values())               
+      279 +_TITLE_FILLER = {"founder", "co founder", "cofounder", "chairm
+          +an", "chair", "chairwoman",                                   
+      280 +                 "chairperson", "president", "svp", "evp", "ch
+          +airman of the board", ""}                                     
+      281 +                                                              
+      282 +                                                              
+      283 +def single_holder_roles(title: str) -> set[str]:              
+      284 +    """Company-wide one-person roles in a title: 'Co-founder /
+          + CTO' -> {'cto'}.                                             
+      285 +    Scoped titles ('Crypto CFO', 'COO, Robinhood Financial') a
+          +nd Co-CEOs give none."""                                      
+      286 +    t = _level_text(title)                                    
+      287 +    for long_form, short in _SINGLE_ROLE_LONG.items():        
+      288 +        t = t.replace(long_form, short)                       
+      289 +    parts = [p.strip() for p in re.split(r",|&|/|;|\+|\band\b"
+          +, t)]                                                         
+      290 +    if any(p not in _SINGLE_ROLES and p not in _TITLE_FILLER f
+          +or p in parts):                                               
+      291 +        return set()                                          
+      292 +    return {p for p in parts if p in _SINGLE_ROLES}           
+      293 +                                                              
+      294 +                                                              
+      295  def registrable_domain(url_or_host: str) -> str:
+      296      """'https://investors.acme.co.uk/x' -> 'acme.co.uk'; 'www.
+           acme.com' -> 'acme.com'."""
+      297      host = urlparse(url_or_host).netloc if "//" in url_or_host
+            else url_or_host
+
+● Update(entities.py)
+  ⎿  Added 3 lines, removed 4 lines
+      307  
+      308  
+      309  def source_tier(url: str, company_domain: str, source_type: st
+           r = "") -> int:
+      310 -    """1 = company's own domain (any subdomain), government fi
+          -ling, or a source the                                         
+      311 -    evaluator classified official/regulatory; 2 = other accept
+          -ed public sources."""                                         
+      312 -    if (registrable_domain(url) == registrable_domain(company_
+          -domain) or _is_gov(url)                                       
+      313 -            or source_type in OFFICIAL_TYPES):                
+      310 +    """1 = company's own domain (any subdomain) or a governmen
+          +t filing - decided by                                         
+      311 +    the URL only, never by an LLM label; 2 = other accepted pu
+          +blic sources."""                                              
+      312 +    if registrable_domain(url) == registrable_domain(company_d
+          +omain) or _is_gov(url):                                       
+      313          return 1
+      314      return 2
+      315  
+
+● Next: the date rule (a person's own profile counts as current), the roster
+  rule, and one-person-role conflicts in resolve_people and _consolidate.
+
+● Update(entities.py)
+  ⎿  Added 13 lines, removed 6 lines
+      365  def _record_date(r: dict, fetched: tuple[int, int, int]) -> tu
+           ple[int, int, int]:
+      366      """Effective date of a record's evidence.
+      367  
+      368 -    A live (non-article) page on the company's own site descri
+          -bes the present, so a                                         
+      369 -    role it lists is evidence as of the fetch date - even if i
+          -t mentions a start date                                       
+      370 -    ("on our board since 2021"). Otherwise use the date the so
+          -urce states, if any."""                                       
+      371 -    live_company_page = (registrable_domain(r["source_url"]) =
+          -= r["_company"]                                               
+      372 -                         and not _ARTICLE_PATH.search(urlparse
+          -(r["source_url"]).path))                                      
+      373 -    if live_company_page and r.get("status") != "former":     
+      368 +    Evidence of the present counts as of the fetch date, even 
+          +without a stated date:                                        
+      369 +    - a live (non-article) page on the company's own site ("on
+          + our board since 2021");                                      
+      370 +    - a person's own public profile (the only person on that p
+          +age) that presents the                                        
+      371 +      role as current, e.g. a LinkedIn position "to present". 
+      372 +    Otherwise use the date the source states, if any."""      
+      373 +    if r.get("status") == "former":                           
+      374 +        return parse_date(r.get("as_of"))                     
+      375 +    if _is_live_company_page(r) or (r.get("_own_profile") and 
+          +r.get("status") == "current"):                                
+      376          return fetched
+      377      return parse_date(r.get("as_of"))
+      378  
+      379  
+      380 +def _is_live_company_page(r: dict) -> bool:                   
+      381 +    return (registrable_domain(r["source_url"]) == r["_company
+          +"]                                                            
+      382 +            and not _ARTICLE_PATH.search(urlparse(r["source_ur
+          +l"]).path))                                                   
+      383 +                                                              
+      384 +                                                              
+      385  def is_recent(d: tuple[int, int, int], fetched: tuple[int, int
+           , int]) -> bool:
+      386      if d == (0, 0, 0):
+      387          return False
+
+● Update(entities.py)
+  ⎿  Added 4 lines, removed 3 lines
+      415      Records may carry `status` ("current"/"former"/"unknown", 
+           from extraction; used
+      416      only here, never stored), `source_type` (from source evalu
+           ation), `person_id`
+      417      (existing DB id - the merged person keeps the lowest), `al
+           iases`, and
+      418 -    `extra_sources` (supporting URLs without a title). People 
+          -whose only roles are                                          
+      419 -    former are excluded. `stats` gets checked/merged/failed/ex
+          -cluded_former counts."""                                      
+      418 +    `extra_sources` (supporting URLs without a title). `stats`
+          + gets                                                         
+      419 +    checked/merged/failed/excluded_former counts and `excluded
+          +`: one                                                        
+      420 +    {name, title, reason, weak} entry per excluded person (`we
+          +ak` = no official source)."""                                 
+      421      stats = stats if stats is not None else {}
+      421 -    stats.update(checked=0, merged=0, failed=0, excluded_forme
+          -r=0)                                                          
+      422 +    stats.update(checked=0, merged=0, failed=0, excluded_forme
+          +r=0, excluded=[])                                             
+      423      fetched = (fetched_on or date.today()).timetuple()[:3]
+      424      company = registrable_domain(company_domain)
+      425      at_company = re.compile(rf"\s+(at|@)\s+{re.escape(company_
+           name)}\.?$", re.I) \
+
+● Update(entities.py)
+  ⎿  Added 13 lines
+      425      at_company = re.compile(rf"\s+(at|@)\s+{re.escape(company_
+           name)}\.?$", re.I) \
+      426          if company_name else None
+      427  
+      428 +    # Who appears on which page: a profile page naming one per
+          +son is that person's own                                      
+      429 +    # profile; a live company page naming ROSTER_MIN+ people i
+          +s a current roster.                                           
+      430 +    names_on: dict[str, set[str]] = {}                        
+      431 +    for rec in records:                                       
+      432 +        parts = parse_name(rec.get("name") or "")             
+      433 +        if parts and rec.get("source_url"):                   
+      434 +            names_on.setdefault(rec["source_url"], set()).add(
+          +parts.key)                                                    
+      435 +    has_roster = any(len(names) >= ROSTER_MIN and _is_live_com
+          +pany_page(                                                    
+      436 +        {"source_url": u, "_company": company}) for u, names i
+          +n names_on.items())                                           
+      437 +                                                              
+      438      # --- Stage 1: clean records and group by exact normalized
+            name.
+      439      clusters: dict[str, list[dict]] = {}
+      440      parts_of: dict[str, NameParts] = {}
+     ...
+      445          if rec.get("source_type") == "people_data_aggregator":
+      446              continue  # never evidence (defensive; such source
+           s are filtered earlier)
+      447          r = dict(rec)
+      448 +        r["_own_profile"] = (r.get("source_type") == "professi
+          +onal_profile"                                                 
+      449 +                             and len(names_on[r["source_url"]]
+          +) == 1                                                        
+      450 +                             and not _ARTICLE_PATH.search(urlp
+          +arse(r["source_url"]).path))                                  
+      451          r["name"] = display_name(r["name"])
+      452          r["title"] = (r.get("title") or "").strip()
+      453          if at_company:
+
+● Update(entities.py)
+  ⎿  Added 85 lines, removed 11 lines
+      495      merged: dict[str, list[dict]] = {}
+      496      for k, recs in clusters.items():
+      497          merged.setdefault(find(k), []).extend(recs)
+      498 -    people = []                                               
+      498 +                                                              
+      499 +    def exclude(recs: list[dict], reason: str) -> None:       
+      500 +        if reason == REASON_FORMER:                           
+      501 +            stats["excluded_former"] += 1                     
+      502 +        stats["excluded"].append({"name": recs[0]["name"], "ti
+          +tle": recs[0]["title"],                                       
+      503 +                                  "reason": reason, "weak": al
+          +l(r["tier"] > 1 for r in recs)})                              
+      504 +        log(f"Excluded {recs[0]['name']}: {reason}")          
+      505 +                                                              
+      506 +    built: list[tuple[list[dict], dict]] = []                 
+      507      for recs in merged.values():
+      500 -        person = _consolidate(recs, fetched)                  
+      508 +        person, reason = _consolidate(recs, fetched)          
+      509          if person is None:
+      502 -            stats["excluded_former"] += 1                     
+      503 -            log(f"Excluded (only former roles): {recs[0]['name
+          -']}")                                                         
+      510 +            exclude(recs, reason)                             
+      511 +        elif has_roster and not person["_on_live_page"] and no
+          +t is_recent(person["_date"], fetched):                        
+      512 +            exclude(recs, REASON_NOT_ON_ROSTER)               
+      513          else:
+      505 -            people.append(person)                             
+      514 +            built.append((recs, person))                      
+      515 +                                                              
+      516 +    # --- Stage 3: one-person roles (CEO, CTO, ...) claimed by
+          + different people.                                            
+      517 +    holders: dict[str, list[int]] = {}                        
+      518 +    for i, (_, p) in enumerate(built):                        
+      519 +        for role in p["_single_roles"]:                       
+      520 +            holders.setdefault(role, []).append(i)            
+      521 +    dropped: set[int] = set()                                 
+      522 +    for role, idx in holders.items():                         
+      523 +        idx = [i for i in idx if i not in dropped]            
+      524 +        if len(idx) < 2:                                      
+      525 +            continue                                          
+      526 +        idx.sort(key=lambda i: built[i][1]["_single_roles"][ro
+          +le], reverse=True)                                            
+      527 +        top, second = (built[i][1]["_single_roles"][role] for 
+          +i in idx[:2])                                                 
+      528 +        decided = top > second and (second != (0, 0, 0) or is_
+          +recent(top, fetched))                                         
+      529 +        label = role.upper() if role != "general counsel" else
+          + "General Counsel"                                            
+      530 +        if not decided:                                       
+      531 +            names = ", ".join(built[i][1]["name"] for i in idx
+          +)                                                             
+      532 +            for i in idx:                                     
+      533 +                built[i][1]["conflict"] = f"Sources disagree o
+          +n who is {label}: {names}"                                    
+      534 +            log(f"Unresolved: several people listed as {label}
+          + ({names})")                                                  
+      535 +            continue                                          
+      536 +        winner = built[idx[0]][1]                             
+      537 +        for i in idx[1:]:                                     
+      538 +            recs = [r for r in built[i][0] if role not in sing
+          +le_holder_roles(r["title"])]                                  
+      539 +            person, reason = _consolidate(recs, fetched) if re
+          +cs else (None, "")                                            
+      540 +            if person is None:                                
+      541 +                exclude(built[i][0], f"{label} role superseded
+          +: {winner['name']} is listed "                                
+      542 +                                     f"as {label} in newer evi
+          +dence")                                                       
+      543 +                dropped.add(i)                                
+      544 +            else:                                             
+      545 +                built[i] = (recs, person)                     
+      546 +                log(f"{built[i][1]['name']}: {label} claim sup
+          +erseded by {winner['name']}")                                 
+      547 +                                                              
+      548 +    people = []                                               
+      549 +    for i, (_, p) in enumerate(built):                        
+      550 +        if i not in dropped:                                  
+      551 +            people.append({k: v for k, v in p.items() if not k
+          +.startswith("_")})                                            
+      552      return people
+      553  
+      554  
+      509 -def _consolidate(recs: list[dict], fetched: tuple[int, int, in
+          -t]) -> dict | None:                                           
+      510 -    """Build one person from all their records, or None if eve
+          -ry role is former."""                                         
+      555 +ROSTER_MIN = 3  # people listed on a live company page for it 
+          +to count as a roster                                          
+      556 +REASON_FORMER = "only former roles"                           
+      557 +REASON_NO_LEADERSHIP = "no qualifying leadership title (board-
+          +only, founder-only, or other role)"                           
+      558 +REASON_NOT_ON_ROSTER = ("not on the company's current leadersh
+          +ip pages, and no recent "                                     
+      559 +                        "evidence of the role")               
+      560 +                                                              
+      561 +                                                              
+      562 +def _consolidate(recs: list[dict], fetched: tuple[int, int, in
+          +t]) -> tuple[dict | None, str]:                               
+      563 +    """Build one person from all their records, or (None, reas
+          +on) if they hold no                                           
+      564 +    current leadership role."""                               
+      565      formers = [r for r in recs if r["status"] == "former"]
+      566      # Outdated roles are dropped, not stored: explicit "former
+           " records, and current
+      567      # claims of a role that an equally new or newer source say
+           s has ended.
+      568      active = [r for r in recs if r["status"] != "former"
+      569                and not any(_supersedes(f, r) for f in formers)]
+      570      if not active:
+      517 -        return None                                           
+      571 +        return None, REASON_FORMER                            
+      572 +    for r in active:                                          
+      573 +        r["level"] = leadership_level(r["title"], r.get("senio
+          +rity") or "")                                                 
+      574 +    qualifying = [r for r in active if r["level"]]            
+      575 +    if not qualifying:                                        
+      576 +        return None, REASON_NO_LEADERSHIP                     
+      577  
+      578      def rank(r: dict):
+      579          return (r["tier"], tuple(-x for x in r["date"]),
+      580                  0 if r["status"] == "current" else 1,
+      522 -                SENIORITY_RANK.get(r.get("seniority"), 4), -le
+          -n(r["title"]))                                                
+      581 +                LEVEL_RANK[r["level"]], -len(r["title"]))     
+      582  
+      524 -    active.sort(key=rank)                                     
+      525 -    best = active[0]                                          
+      583 +    qualifying.sort(key=rank)                                 
+      584 +    best = qualifying[0]                                      
+      585 +    active.sort(key=lambda r: r is not best)                  
+      586  
+      587 +    # A current non-leadership job title in an equally new or 
+          +newer source                                                  
+      588 +    # (e.g. profile headline "Solution Consultant" vs. "Head o
+          +f ...") is a discrepancy.                                     
+      589 +    conflict = ""                                             
+      590 +    contra = next((r for r in active if r["status"] == "curren
+          +t" and r["date"] >= best["date"]                              
+      591 +                   and _is_other_job(r["title"])), None)      
+      592 +    if contra:                                                
+      593 +        conflict = (f'Sources disagree: also listed as "{contr
+          +a["title"]}" '                                                
+      594 +                    f'({contra["source_url"]})')              
+      595 +                                                              
+      596 +    single: dict[str, tuple[int, int, int]] = {}              
+      597 +    for r in qualifying:                                      
+      598 +        for role in single_holder_roles(r["title"]):          
+      599 +            single[role] = max(single.get(role, (0, 0, 0)), r[
+          +"date"])                                                      
+      600 +                                                              
+      601      # Canonical spelling: the name the company itself uses, th
+           en filings, then other
+      602      # sources; within a level, the most frequently used spelli
+           ng. Spellings from
+      603      # dropped (former) records are still kept as aliases.
+
+● Now the end of _consolidate:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Counting people per page to spot personal profiles breaks when excluded
+  records aren't stored, so I'll instead identify own profiles by whether the
+  person's name appears in the URL. · summary
+
+● Update(entities.py)
+  ⎿  Added 1 line, removed 3 lines
+      445          if rec.get("source_type") == "people_data_aggregator":
+      446              continue  # never evidence (defensive; such source
+           s are filtered earlier)
+      447          r = dict(rec)
+      448 -        r["_own_profile"] = (r.get("source_type") == "professi
+          -onal_profile"                                                 
+      449 -                             and len(names_on[r["source_url"]]
+          -) == 1                                                        
+      450 -                             and not _ARTICLE_PATH.search(urlp
+          -arse(r["source_url"]).path))                                  
+      448 +        r["_own_profile"] = _is_own_profile(r, parts)         
+      449          r["name"] = display_name(r["name"])
+      450          r["title"] = (r.get("title") or "").strip()
+      451          if at_company:
+
+● Update(entities.py)
+  ⎿  Added 1 line, removed 2 lines
+      425      at_company = re.compile(rf"\s+(at|@)\s+{re.escape(company_
+           name)}\.?$", re.I) \
+      426          if company_name else None
+      427  
+      428 -    # Who appears on which page: a profile page naming one per
+          -son is that person's own                                      
+      429 -    # profile; a live company page naming ROSTER_MIN+ people i
+          -s a current roster.                                           
+      428 +    # A live company page naming ROSTER_MIN+ people is a curre
+          +nt roster.                                                    
+      429      names_on: dict[str, set[str]] = {}
+      430      for rec in records:
+      431          parts = parse_name(rec.get("name") or "")
+
+● Update(entities.py)
+  ⎿  Added 13 lines
+      377      return parse_date(r.get("as_of"))
+      378  
+      379  
+      380 +def _is_own_profile(r: dict, parts: NameParts) -> bool:       
+      381 +    """The person's own public profile (e.g. linkedin.com/in/j
+          +ane-doe, janedoe.com),                                        
+      382 +    not a company page or a post: the URL itself carries the p
+          +erson's name."""                                              
+      383 +    if r.get("source_type") != "professional_profile":        
+      384 +        return False                                          
+      385 +    u = urlparse(r["source_url"])                             
+      386 +    if _ARTICLE_PATH.search(u.path):                          
+      387 +        return False                                          
+      388 +    compact = re.sub(r"[^a-z]", "", (u.netloc + u.path).lower(
+          +))                                                            
+      389 +    last = parts.last.replace(" ", "")                        
+      390 +    return last in compact and (parts.first in compact or len(
+          +last) >= 5)                                                   
+      391 +                                                              
+      392 +                                                              
+      393  def _is_live_company_page(r: dict) -> bool:
+      394      return (registrable_domain(r["source_url"]) == r["_company
+           "]
+      395              and not _ARTICLE_PATH.search(urlparse(r["source_ur
+           l"]).path))
+
+● Update(entities.py)
+  ⎿  Added 2 lines, removed 1 line
+      644          "title": best["title"],
+      645          "as_of": format_date(best["date"]),  # effective evide
+           nce date (internal)
+      646          "may_be_outdated": not is_recent(best["date"], fetched
+           ),
+      647 +        "conflict": conflict,                                 
+      648          "department": best.get("department") or next(
+      649              (r["department"] for r in active if r.get("departm
+           ent")), ""),
+      649 -        "seniority": best.get("seniority") or "other",        
+      650 +        "seniority": best["level"],                           
+      651          "source_url": best["source_url"],
+      652          "source_urls": list(dict.fromkeys(
+      653              [r["source_url"] for r in active] + [u for r in ac
+           tive
+● Update(entities.py)
+  ⎿  Added 5 lines, removed 1 line
+      654                                                   for u in r.ge
+           t("extra_sources") or []])),
+      655          "evidence": best.get("evidence") or "",
+      656          "roles": roles,
+      657 -    }                                                         
+      657 +        # internal, used by resolve_people and stripped from t
+          +he result                                                     
+      658 +        "_date": best["date"],                                
+      659 +        "_on_live_page": any(_is_live_company_page(r) for r in
+          + active),                                                     
+      660 +        "_single_roles": single,                              
+      661 +    }, ""                                                     
+
+● Quick check of the new title and role helpers against the real titles:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The helpers behave as intended. Next, source_policy.py: only the URL rules may
+  label a source official or a filing.
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python - <<'EOF'
+      imp…)
+  ⎿  Updated source_policy.py (+157 -141)
+        1 -"""Decide whether a fetched page may be used as leadership evi
+          -dence.                                                        
+        2 -                                                              
+        3 -Two layers, applied before extraction and storage:            
+        4 -                                                              
+        5 -1. Deterministic rules (no API calls):                        
+        6 -   - reject pages with no readable content or behind a login w
+          -all;                                                          
+        7 -   - accept the company's own domain (any subdomain) as "offic
+          -ial";                                                         
+        8 -   - accept government domains (e.g. sec.gov filings) as "regu
+          -latory";                                                      
+        9 -   - reject pages that look like people/contact-data listings 
+          -(email formats,                                               
+       10 -     phone numbers, "reveal contact" prompts) - judged by URL 
+          -and content                                                   
+       11 -     patterns, not by a domain blocklist.                     
+       12 -2. LLM assessment (batched) for everything else: the classifie
+          -r labels each page                                            
+       13 -   (news, reference, public professional profile, people-data 
+          -aggregator, ...)                                              
+       14 -   and whether it is credible. Only credible pages of accepted
+          - types are used.                                              
+       15 -                                                              
+       16 -If the classifier is unavailable or fails, ambiguous pages are
+          - rejected:                                                    
+       17 -unverified sources are never used as evidence.                
+       18 -"""                                                           
+       19 -                                                              
+       20 -from __future__ import annotations                            
+       21 -                                                              
+       22 -import re                                                     
+       23 -from dataclasses import dataclass                             
+       24 -from typing import Callable                                   
+       25 -from urllib.parse import urlparse                             
+       26 -                                                              
+       27 -from entities import registrable_domain                       
+       28 -                                                              
+       29 -SOURCE_TYPES = ["official", "regulatory", "news", "reference",
+          - "professional_profile",                                      
+       30 -                "people_data_aggregator", "other"]            
+       31 -ACCEPTED_TYPES = {"official", "regulatory", "news", "reference
+          -", "professional_profile"}                                    
+       32 -SOURCE_LABEL = {                                              
+       33 -    "official": "Company website", "regulatory": "Regulatory f
+          -iling", "news": "News",                                       
+       34 -    "reference": "Reference", "professional_profile": "Public 
+          -profile",                                                     
+       35 -}                                                             
+       36 -                                                              
+       37 -MIN_TEXT_CHARS = 200                                          
+       38 -_LOGIN_URL = re.compile(r"/(login|signin|sign-in|authwall|chec
+          -kpoint|uas/login)(/|\?|$)", re.I)                             
+       39 -_LOGIN_TEXT = re.compile(                                     
+       40 -    r"(sign in|log in|login|join now|create (an|your|a free) a
+          -ccount) to (see|view|continue|"                               
+     … 258 more lines (ctrl+o to expand)
+
+● Now rag.py, starting with the source check (add the "about this company?"
+  answer) and the extraction instructions:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The shell couldn't parse the inline script, so I'll save it to a scratch file
+  and run that.
+
+  Made 1 scratchpad edit +151 (ctrl+o to expand)
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python "C:/Users/nab…)
+  ⎿  1 file changed (binary, mode only or too large to show)
+
+● Next, ingest_company: shared helpers for source checking and extraction, a
+  corroboration step for people with weak support, and the collection report.
+
+  Made 1 scratchpad edit +167, ran 1 shell command (ctrl+o to expand)
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python -c "
+      s=open('…)
+  ⎿  Updated rag.py (+132 -34)
+      356                             page.published, origin="collect")
+      357  
+      358  
+      359 -def ingest_company(url: str, log=print) -> int:               
+      360 -    """Crawl site + Wikipedia + Tavily search -> source evalua
+          -tion -> Gemini                                                
+      361 -    extraction -> entity resolution -> SQLite."""             
+      362 -    db.init_db()                                              
+      363 -    try:                                                      
+      364 -        base, name, pages = scraper.crawl_company_site(url, lo
+          -g=log)                                                        
+      365 -    except RuntimeError as e:                                 
+      366 -        if not search.tavily_available():                     
+      367 -            raise                                             
+      368 -        log(f"{e} Continuing with web search only.")          
+      369 -        base = scraper.normalize_url(url)                     
+      370 -        name = scraper.bare_domain(base).split(".")[0].title()
+      371 -        pages = []                                            
+      372 -    domain = scraper.bare_domain(base)                        
+      373 -    context = (scraper.site_description(pages[0].text) if page
+          -s else "") or "(unknown)"                                     
+      359 +MAX_CORROBORATE = 10  # targeted searches per collection for w
+          +eakly supported people                                        
+      360  
+      375 -    wiki = scraper.fetch_wikipedia(name, base, log=log)       
+      376 -    if wiki:                                                  
+      377 -        pages.append(wiki)                                    
+      378 -    pages += search.discover(name, base, seen_urls={p.url for 
+          -p in pages}, log=log)                                         
+      361  
+      380 -    # 1. Evaluate every source BEFORE extraction and storage (
+          -final URLs after redirects).                                  
+      362 +def _evaluate_pages(pages: list, domain: str, classifier, orig
+          +in: str, report: dict,                                        
+      363 +                    log) -> list:                             
+      364 +    """Source policy on every page; returns the accepted (page
+          +, verdict) pairs and                                          
+      365 +    records every decision in the collection report."""       
+      366 +    if not pages:                                             
+      367 +        return []                                             
+      368      verdicts = source_policy.evaluate([{"url": p.url, "text": 
+           p.text} for p in pages], domain,
+      382 -                                      make_llm_classifier(name
+          -, domain), log=log)                                           
+      383 -    accepted = [(p, v) for p, v in zip(pages, verdicts) if v.a
+          -ccepted]                                                      
+      369 +                                      classifier, log=log)    
+      370 +    accepted = []                                             
+      371      for p, v in zip(pages, verdicts):
+      385 -        if not v.accepted:                                    
+      372 +        report["pages"].append({"url": p.url, "origin": origin
+          +, "accepted": v.accepted,                                     
+     … 160 more lines (ctrl+o to expand)
+
+● Update(rag.py)
+  ⎿  Added 4 lines, removed 2 lines
+      438          except Exception as e:
+      439              log(f"Corroboration search failed for {t['name']}:
+            {e}")
+      440              continue
+      441 -        last = (entities.parse_name(t["name"]) or entities.par
+          -se_name("x " + t["name"])).last                               
+      442 -        added = 0                                             
+      441 +        parts = entities.parse_name(t["name"])                
+      442 +        if not parts:                                         
+      443 +            continue                                          
+      444 +        last, added = parts.last, 0                           
+      445          for p in results:
+      446              key = p.url.rstrip("/")
+      447              low = entities._ascii(p.text).lower()
+
+● Update(rag.py)
+  ⎿  Added 2 lines, removed 1 line
+      544      urls = list(dict.fromkeys([r["source_url"] for r in record
+           s]
+      545                                + [u for r in records for u in r
+           .get("extra_sources", [])]
+      546                                + list(sources)))
+      547 -    known = {u: sources[u]["source_type"] for u in urls       
+      547 +    # Stored types are kept, except that only URL rules may ma
+          +ke a source official.                                         
+      548 +    known = {u: source_policy.trusted_type(u, sources[u]["sour
+          +ce_type"], domain) for u in urls                              
+      549               if u in sources and sources[u].get("source_type")
+           }
+      550      pending = [u for u in urls if u not in known]
+      551      quotes = {r["source_url"]: r.get("evidence") or "" for r i
+           n records}
+
+● Now the answering side: count only the three levels, and show disagreements in
+  the chat context.
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python - "C:/x" <<'P…)
+  ⎿  Updated rag.py (+13 -6)
+      614  
+      615  # ============================================================
+           ==== hybrid answering
+      616  
+      617 -SENIORITY_LABEL = {"executive": "Executives", "vp": "VPs", "de
+          -partment_head": "Department heads",                           
+      618 -                   "board": "Board members", "other": "Other"}
+      617 +# Leadership levels, decided from titles (entities.leadership_
+          +level).                                                       
+      618 +SENIORITY_LABEL = {"executive": "C-level executives (incl. pre
+          +sidents)",                                                    
+      619 +                   "vp": "Vice Presidents (incl. SVPs/EVPs)", 
+      620 +                   "department_head": "Department heads"}     
+      621  
+      622  
+      623  def count_people(people: list[dict]) -> dict:
+      624      """Deterministic counts of unique people (one row per cano
+           nical person)."""
+      625      by = {k: 0 for k in SENIORITY_LABEL}
+      626      for p in people:
+      625 -        by[p.get("seniority") if p.get("seniority") in by else
+          - "other"] += 1                                                
+      627 +        if p.get("seniority") in by:                          
+      628 +            by[p["seniority"]] += 1                           
+      629      return {"total": len(people), "by_seniority": by,
+      627 -            "may_be_outdated": sum(bool(p.get("may_be_outdated
+          -")) for p in people)}                                         
+      630 +            "may_be_outdated": sum(bool(p.get("may_be_outdated
+          +")) for p in people),                                         
+      631 +            "sources_disagree": sum(bool(p.get("conflict")) fo
+          +r p in people)}                                               
+      632  
+      633  
+      634  _QUESTION_WORDS = {
+     ...
+      723               f"- Unique people listed: {counts['total']}"]
+      724      lines += [f"- {SENIORITY_LABEL[k]}: {v}" for k, v in count
+           s["by_seniority"].items()]
+      725      lines.append(f"- Titles that may be outdated: {counts['may
+           _be_outdated']}")
+      726 +    lines.append(f"- People whose sources disagree: {counts['s
+          +ources_disagree']}")                                          
+      727      lines.append("\nPEOPLE (one line per unique person):")
+      728      if not people:
+      729          lines.append("(no leaders found)")
+      730      for p in people:
+      731          alias = f" (also written: {', '.join(p['aliases'])})" 
+           if p["aliases"] else ""
+      727 -        title = p["title"] + (" (may be outdated)" if p["may_b
+          -e_outdated"] else "")                                         
+      732 +        title = p["title"] + (" (may be outdated)" if p["may_b
+          +e_outdated"] else "") + (                                     
+      733 +            f" (unresolved: {p['conflict']})" if p.get("confli
+          +ct") else "")                                                 
+      734          lines.append(f"- [P{p['person_id']}] {p['name']}{alias
+           } | {title} | "
+      735                       f"{p['department']} | {SENIORITY_LABEL.ge
+           t(p['seniority'], 'Other')} | "
+      736                       f"source: {p['source_url']}")
+     … 9 more lines (ctrl+o to expand)
+
+● Next, the database.py columns: leaders.conflict and
+  companies.collection_report.
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python - <<'PYEOF'
+      s…)
+  ⎿  1 file changed (binary, mode only or too large to show)
+
+● Now views.py: the conflict label on titles, plus summary rows for the
+  collection report.
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python - <<'PYEOF'
+      s…)
+  ⎿  Updated views.py (+72 -39)
+       1 -"""User-facing table rows. Internal fields (person IDs, dates, 
+         -source tiers) are                                              
+       2 -used for logic but never shown."""                             
+       3 -                                                               
+       4 -import source_policy                                           
+       5 -                                                               
+       6 -SENIORITY_DISPLAY = {"executive": "Executive", "vp": "VP", "dep
+         -artment_head": "Department head",                              
+       7 -                     "board": "Board", "other": "Other"}       
+       8 -PEOPLE_COLUMNS = ["Name", "Also known as", "Title", "Department
+         -", "Seniority", "Source",                                      
+       9 -                  "More sources"]                              
+      10 -EVIDENCE_COLUMNS = ["Name", "Title", "Source type", "Source", "
+         -Evidence"]                                                     
+      11 -                                                               
+      12 -                                                               
+      13 -def people_rows(leaders: list[dict]) -> list[dict]:            
+      14 -    rows = []                                                  
+      15 -    for p in leaders:                                          
+      16 -        urls = [u for u in (p.get("source_urls") or p["source_u
+         -rl"]).split("\n") if u]                                        
+      17 -        rows.append({                                          
+      18 -            "Name": p["name"],                                 
+      19 -            "Also known as": ", ".join(p.get("aliases") or []),
+      20 -            "Title": (p.get("title") or "") + (" (may be outdat
+         -ed)" if p.get("may_be_outdated")                               
+      21 -                                               else ""),       
+      22 -            "Department": p.get("department") or "",           
+      23 -            "Seniority": SENIORITY_DISPLAY.get(p.get("seniority
+         -"), "Other"),                                                  
+      24 -            "Source": p["source_url"],                         
+      25 -            "More sources": [u for u in urls if u != p["source_
+         -url"]],                                                        
+      26 -        })                                                     
+      27 -    return rows                                                
+      28 -                                                               
+      29 -                                                               
+      30 -def evidence_rows(roles: list[dict]) -> list[dict]:            
+      31 -    return [{                                                  
+      32 -        "Name": r["name"],                                     
+      33 -        "Title": r["title"],                                   
+      34 -        "Source type": source_policy.SOURCE_LABEL.get(r.get("so
+         -urce_type") or "",                                             
+      35 -                                                      "Official
+         - / filing" if r.get("source_tier") == 1                        
+      36 -                                                      else "Pub
+         -lic source"),                                                  
+      37 -        "Source": r["source_url"],                             
+      38 -        "Evidence": r.get("evidence") or "",                   
+      39 -    } for r in roles]                                          
+       1 +"""User-facing table rows. Internal fields (person IDs, dates, 
+         +source tiers) are                                              
+     … 71 more lines (ctrl+o to expand)
+
+● Next, the app: a "Collection report" expander and a list of disagreements.
+
+● Update(app.py)
+  ⎿  Added 19 lines
+      92              hide_index=True,
+      93              width="stretch",
+      94          )
+      95 +        for note in views.disagreements(leaders):              
+      96 +            st.warning(f"Unresolved: {note}")                  
+      97          roles = db.get_role_history(company_id)
+      98          if roles:
+      99              with st.popover("Supporting evidence"):
+     ...
+      107              "block automated requests, or not publish leadersh
+           ip publicly."
+      108          )
+      109  
+      110 +summary = views.report_summary(company.get("collection_report"
+          +))                                                            
+      111 +if summary:                                                   
+      112 +    with st.expander("Collection report (sources and candidate
+          +s found, rejected, accepted)"):                               
+      113 +        s, c = summary["sources"], summary["candidates"]      
+      114 +        cols = st.columns(6)                                  
+      115 +        for col, (label, value) in zip(cols, [                
+      116 +                ("Sources found", s["found"]), ("Sources accep
+          +ted", s["accepted"]),                                         
+      117 +                ("Sources rejected", s["rejected"]), ("Candida
+          +te records", c["extracted"]),                                 
+      118 +                ("Records rejected", c["rejected"]), ("People 
+          +excluded", c["people_excluded"])]):                           
+      119 +            col.metric(label, value)                          
+      120 +        for heading, key in [("Rejected sources", "rejected_so
+          +urces"),                                                      
+      121 +                             ("Rejected candidate records", "r
+          +ejected_candidates"),                                         
+      122 +                             ("Excluded people", "excluded_peo
+          +ple")]:                                                       
+      123 +            if summary[key]:                                  
+      124 +                st.markdown(f"**{heading}**")                 
+      125 +                st.dataframe(pd.DataFrame(summary[key]), hide_
+          +index=True, width="stretch")                                  
+      126 +                                                              
+      127  st.session_state.setdefault("messages", [])
+      128  for msg in st.session_state.messages:
+      129      with st.chat_message(msg["role"]):
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python - <<'PYEOF'
+      s…)
+  ⎿  Updated search.py (+13 -11)
+      13  
+      14  load_dotenv()
+      15  
+      16 -# (query template, restrict to company domain?). Phrased to sur
+         -face primary                                                   
+      17 -# sources - the company's own pages, press releases about appoi
+         -ntments, filings,                                              
+      18 -# and news coverage. Every result is still evaluated by source_
+         -policy.                                                        
+      16 +# (query template, where to search). Phrased to surface primary
+         + sources - the                                                 
+      17 +# company's own pages (incl. blog posts naming officers), appoi
+         +ntment announcements,                                          
+      18 +# filings, news, and public profiles. Every result is still eva
+         +luated by source_policy.                                       
+      19 +# where: None = whole web, "site" = the company's own domain, o
+         +r a list of domains.                                           
+      20  QUERY_TEMPLATES = [
+      20 -    ('"{name}" {domain} leadership team executives', False),   
+      21 -    ('"{name}" {domain} CEO founder co-founder', False),       
+      22 -    ('"{name}" appoints OR names chief officer', False),       
+      23 -    ('"{name}" {domain} vice president OR "head of"', False),  
+      24 -    ('"{name}" executive officers directors SEC filing proxy', 
+         -False),                                                        
+      25 -    ("{name} leadership team management board", True),         
+      21 +    ('"{name}" {domain} leadership team executives', None),    
+      22 +    ('"{name}" {domain} CEO founder co-founder', None),        
+      23 +    ('"{name}" appoints OR names chief officer', None),        
+      24 +    ('"{name}" {domain} vice president OR "head of"', None),   
+      25 +    ('"{name}" executive officers directors SEC filing proxy', 
+         +None),                                                         
+      26 +    ('{name} CTO OR CFO OR COO OR "vice president" OR "head of"
+         + OR leadership', "site"),                                      
+      27 +    ('"{name}" {domain} "head of" OR "vice president" OR chief'
+         +, ["linkedin.com"]),                                           
+      28  ]
+      29  RESULTS_PER_QUERY = 5
+      30  
+     ...
+      46      seen = {u.rstrip("/") for u in (seen_urls or set())}
+      47      pages: list[Page] = []
+      48  
+      47 -    for template, on_site in QUERY_TEMPLATES:                  
+      49 +    for template, where in QUERY_TEMPLATES:                    
+      50          query = template.format(name=company_name, domain=domai
+          n)
+      51          try:
+      52              resp = client.search(
+     ...
+      54                  search_depth="advanced",
+      55                  max_results=RESULTS_PER_QUERY,
+      56                  include_raw_content="text",
+      55 -                include_domains=[domain] if on_site else None, 
+      57 +                include_domains=[domain] if where == "site" els
+         +e where,                                                       
+     … 3 more lines (ctrl+o to expand)
+
+● Removing the now-unused SENIORITY_RANK, then running the tests to see what
+  broke:
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" && sed
+      -i '/^SENIORITY_RANK = /d' ent…)
+  ⎿  1 file changed (binary, mode only or too large to show)
+
+● That failure is expected: a "Co-Founder"-only record is now excluded by
+  design. Here are all the failures:
+
+  Ran 3 shell commands (ctrl+o to expand)
+● Most test failures come from the new rules (founder-only and board-only
+  records excluded, LLM labels no longer raising tiers, one current CEO,
+  rejected records as a list), so I'm updating those tests to the intended
+  behavior next. · summary
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python - <<'PYEOF'
+      d…)
+  ⎿  Updated tests\test_entities.py (+12 -5)
+      115  
+      116  
+      117  def test_bhat_bhatt_stay_separate_when_evidence_check_says_no(
+           ):
+      118 -    assert len(resolve(BHATT, FakeResolver(same=False))) == 2 
+      118 +    stats = {}                                                
+      119 +    people = resolve_people(BHATT, COMPANY, "Robinhood", resol
+          +ver=FakeResolver(same=False),                                 
+      120 +                            fetched_on=FETCHED, stats=stats)  
+      121 +    # Kept separate; the "Baiju Bhat" record alone ("Co-Founde
+          +r") is not a leadership role.                                 
+      122 +    assert [p["name"] for p in people] == ["Baiju Bhatt"]     
+      123 +    assert stats["excluded"][0]["name"] == "Baiju Bhat"       
+      124 +    assert stats["excluded"][0]["reason"] == entities.REASON_N
+          +O_LEADERSHIP                                                  
+      125  
+      126  
+      127  def test_bhatt_outdated_role_excluded_and_current_title_kept()
+           :
+     ...
+      247      assert entities.source_tier(url, COMPANY) == tier
+      248  
+      249  
+      244 -def test_tier_follows_evaluated_source_type():                
+      245 -    assert entities.source_tier("https://ir.example-host.com/x
+          -", COMPANY, "official") == 1                                  
+      246 -    assert entities.source_tier("https://www.reuters.com/x", C
+          -OMPANY, "news") == 2                                          
+      250 +def test_llm_label_never_raises_source_tier():                
+      251 +    # Only the URL decides: a third-party page labeled "offici
+          +al" stays tier 2.                                             
+      252 +    assert entities.source_tier("https://ir.example-host.com/x
+          +", COMPANY, "official") == 2                                  
+      253 +    assert entities.source_tier("https://stocktitan.net/sec-fi
+          +lings/x", COMPANY, "regulatory") == 2                         
+      254  
+      255  
+      256  def test_aggregator_records_never_become_evidence():
+     ...
+      280  
+      281      ctx, _urls = rag.build_context(cid, "How many executives a
+           re there?")
+      282      assert "Unique people listed: 2" in ctx
+      276 -    assert "Executives: 2" in ctx                             
+      283 +    assert "C-level executives (incl. presidents): 2" in ctx  
+      284      assert ctx.count("\n- [P") == 2  # one bullet per person, 
+           not per source record
+      285      assert "also written: Baiju Bhat" in ctx
+      286      assert "Co-CEO" not in ctx.split("QUESTION IS ABOUT")[0]  
+           # former role not listed
+  ⎿  Updated tests\test_name_variants.py (+15 -5)
+      76  
+      77  
+      78  def test_alternative_name_kept_separate_when_evidence_check_say
+          s_no():
+      79 -    assert len(resolve(HUANG, "nvidia.com", FakeResolver(same=F
+         -alse))) == 2                                                   
+      79 +    # Kept separate - but then two people claim the one-person 
+         +CEO role, and the live                                         
+      80 +    # company page (current) supersedes the other claim.       
+      81 +    stats = {}                                                 
+      82 +    people = resolve_people(HUANG, "nvidia.com", "", resolver=F
+         +akeResolver(same=False),                                       
+      83 +                            fetched_on=date(2026, 11, 12), stat
+         +s=stats)                                                       
+      84 +    assert [p["name"] for p in people] == ["Jensen Huang"]     
+      85 +    assert "CEO role superseded" in stats["excluded"][0]["reaso
+         +n"]                                                            
+      86  
+      87  
+      88  # -------------------------------------------------------------
+          --- earlier cases
+     ...
+       96       rec("Vladimir Tenev", "Chair of the Board and Chief Execu
+           tive Officer",
+       97           "https://www.sec.gov/Archives/x.htm", as_of="2025-04-
+           25"),
+       98       "robinhood.com"),
+       93 -    (rec("Baiju Bhatt", "Co-Founder", "https://robinhood.com/n
+          -ewsroom/x"),                                                  
+       99 +    (rec("Baiju Bhatt", "Co-Founder and Chief Creative Officer
+          +", "https://robinhood.com/newsroom/x"),                       
+      100       rec("Baiju Bhat", "Co-Founder", "https://fintechleaders.s
+           ubstack.com/p/x"),
+      101       "robinhood.com"),
+      102  ])
+     ...
+      124          rec("Mark Stevens", "Director", "https://www.nvidia.co
+           m/board"),
+      125          rec("Mary Stevens", "Independent Director", "https://w
+           ww.nvidia.com/board"),
+      126      ], "nvidia.com", never_called)
+      121 -    assert len(people) == 2                                   
+      127 +    assert people == []  # never compared, and board-only role
+          +s are not leadership                                          
+      128  
+      129  
+      130  def test_same_title_different_surname_never_compared():
+     ...
+      140      resolver = FakeResolver(same=False)
+      141      people = resolve([
+      142          rec("Amy Chen", "VP, Hardware Engineering", "https://w
+           ww.nvidia.com/a"),
+      137 -        rec("Brian Chen", "Senior Director, Hardware Engineeri
+          -ng", "https://www.nvidia.com/b"),                             
+      143 +        rec("Brian Chen", "Senior Director, Hardware Engineeri
+          +ng", "https://www.nvidia.com/b",                              
+      144 +            seniority="department_head"),                     
+      145      ], "nvidia.com", resolver)
+      146      assert len(resolver.calls) == 1 and len(people) == 2
+      147  
+     ...
+      216          raise RuntimeError("API down")
+     … 10 more lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● This ingest test would now trigger a real corroboration search, because John
+  Roe has only one news source. I'll stub web_search, assert that it was called
+  for him, and check the collection report.
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python - <<'PYEOF'
+      p…)
+  ⎿  1 file changed (binary, mode only or too large to show)
+
+● The existing 72 tests pass again. Now a new test file for the new rules, built
+  from the real cases:
+
+● Write(tests\test_leadership_rules.py)
+  ⎿  Wrote 297 lines to tests\test_leadership_rules.py
+       1 """Leadership scope, current-roster rule, one-person-role confli
+         cts, current profile
+       2 evidence, source discrepancies, evidence dates, and source label
+         s. Offline: all LLM
+       3 and search calls are faked. Fixtures mirror real Robinhood/Campf
+         ire cases; the code
+       4 has no knowledge of them."""
+       5
+       6 from datetime import date
+       7
+     … +290 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All 108 tests pass, so I'm backing up the database and then re-collecting
+  Campfire and Robinhood with full logs. After that I'll re-check NVIDIA and
+  Anthropic from stored data. · summary
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● While that runs, I'll update the README to match.
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python - <<'PYEOF'
+      s…)
+  ⎿  Updated README.md (+151 -130)
+        1 -# Company Leadership RAG Agent                                
+        2 -                                                              
+        3 -Give it a company website URL. It finds the company's executiv
+          -es, VPs, and department heads in public sources: the company's
+          - own site, regulatory filings, news, reference pages, and publ
+          -ic profiles. It checks each source's credibility before using 
+          -it and stores every person in SQLite with the evidence and URL
+          -s behind them. A Streamlit chat answers questions from that da
+          -ta, from stored source passages, and, only when needed, from o
+          -ne targeted web search. Every fact is cited with a clickable s
+          -ource.                                                        
+        4 -                                                              
+        5 -## Quick start                                                
+        6 -                                                              
+        7 -```bash                                                       
+        8 -python -m venv .venv                                          
+        9 -.venv\Scripts\activate            # Windows  (macOS/Linux: sou
+          -rce .venv/bin/activate)                                       
+       10 -pip install -r requirements.txt                               
+       11 -```                                                           
+       12 -                                                              
+       13 -Create `.env`:                                                
+       14 -                                                              
+       15 -```                                                           
+       16 -GEMINI_API_KEY=your-key-here                                  
+       17 -TAVILY_API_KEY=your-key-here      # optional; without it, only
+          - the site crawler and Wikipedia are used,                     
+       18 -                                  # and the chat can't search 
+          -the web                                                       
+       19 -# optional; defaults to gemini-3.5-flash, with automatic fallb
+          -ack and retry                                                 
+       20 -GEMINI_MODEL=gemini-3.5-flash                                 
+       21 -```                                                           
+       22 -                                                              
+       23 -Run:                                                          
+       24 -                                                              
+       25 -```bash                                                       
+       26 -streamlit run app.py                                          
+       27 -python -m pytest tests -q          # 72 offline tests; no API 
+          -keys needed                                                   
+       28 -```                                                           
+       29 -                                                              
+       30 -Enter a URL such as `meetcampfire.com` in the sidebar and clic
+          -k **Collect**. Then ask questions such as *"Who is the CEO?"*,
+          - *"How many VPs are listed?"*, or *"Where is their CEO based?"
+          -*                                                             
+       31 -                                                              
+       32 -## Architecture                                               
+       33 -                                                              
+       34 -```                                                           
+       35 -            ┌─ scraper.py: crawl company site ─┐      source_p
+          -olicy.py       rag.py             entities.py         database
+          -.py                                                           
+       36 -URL ──►     ├─ scraper.py: Wikipedia          ─┼──►  rules, th
+          -en Gemini  ──► Gemini        ──► entity          ──► SQLite   
+       37 -            └─ search.py:  Tavily search      ─┘     (accept /
+          - reject)       extraction        resolution                   
+       38 -                                                              
+       39 -Question ──► rag.answer: SQLite people + exact counts ─► store
+          -d passages about the person ─► (only if needed) one           
+       40 -             targeted Tavily search, same source policy, cache
+          -d ─► Gemini answer ─► links checked ─► app.py                 
+     … 241 more lines (ctrl+o to expand)
+
+● The README is updated. I'm waiting for the re-collection to finish.
+
+● Monitor(Re-collection of Campfire and Robinhood finishing)
+  ⎿  Monitor started · task b47boey07 · timeout 1800s
+
+● The re-collection is still running. I'll review the results once it finishes.
+
+● Background command "Re-collect Campfire and Robinhood" completed (exit code 0)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Robinhood's filtered list is in: board-only members, the Chief of Staff and
+  people with only old evidence are out. Corroboration turned up current
+  evidence for four of the LinkedIn-box people, which I still need to check, and
+  I'm pulling up Campfire's detail next. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Monitor "Re-collection of Campfire and Robinhood finishing" stream ended
+
+● Campfire surfaced no additional people this run, so Paul C Nichols, Jack
+  Arrix, Irina Silva, and Fernando's 2024 launch post remain unfound; I'm
+  listing what each query returned. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The LinkedIn query only returned 3 pages, and Tavily seems to handle long OR
+  queries poorly. I'm comparing a few phrasings directly with 4 Tavily calls
+  before changing any templates. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Plain search phrasing finds the right pages: a LinkedIn query for the
+  leadership team surfaces Paul C Nichols as CTO, and a site-restricted query
+  for the CTO and engineering team finds both the Claude blog post and the 2024
+  launch post. I'll switch the two new templates to this generic wording with 10
+  results each, then re-collect only Campfire, since Robinhood's result doesn't
+  depend on these queries. · summary
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python - <<'PYEOF'
+      s…)
+  ⎿  Updated search.py (+5 -3)
+      23      ('"{name}" appoints OR names chief officer', None),
+      24      ('"{name}" {domain} vice president OR "head of"', None),
+      25      ('"{name}" executive officers directors SEC filing proxy', 
+          None),
+      26 -    ('{name} CTO OR CFO OR COO OR "vice president" OR "head of"
+         - OR leadership', "site"),                                      
+      27 -    ('"{name}" {domain} "head of" OR "vice president" OR chief'
+         -, ["linkedin.com"]),                                           
+      26 +    # Plain keywords (no OR syntax) work best for these two; th
+         +ey get more results.                                           
+      27 +    ("{name} CTO engineering team leadership", "site"),        
+      28 +    ("{name} {domain} leadership team", ["linkedin.com"]),     
+      29  ]
+      30  RESULTS_PER_QUERY = 5
+      31 +RESULTS_RESTRICTED = 10  # site- or domain-restricted queries  
+      32  
+      33  
+      34  def tavily_available() -> bool:
+     ...
+      54              resp = client.search(
+      55                  query,
+      56                  search_depth="advanced",
+      55 -                max_results=RESULTS_PER_QUERY,                 
+      57 +                max_results=RESULTS_RESTRICTED if where else RE
+         +SULTS_PER_QUERY,                                               
+      58                  include_raw_content="text",
+      59                  include_domains=[domain] if where == "site" els
+          e where,
+      60              )
+  ⎿  (timeout 10m)
+
+● Paul Nichols is found now, and Fernando's CTO claim is superseded by the newer
+  evidence. Here's the final data for both companies:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Before reporting, I'll check the evidence behind the people added through
+  LinkedIn and corroboration:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Robinhood's R. Scott Victoria is stored as COO without the TradePMR
+  subsidiary, which could wrongly suggest a COO conflict, and the same LinkedIn
+  page is counted under several country subdomains. I'm adding a rule to keep
+  subsidiary names and de-duplicating by registrable domain plus path before
+  re-collecting. · summary
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python - <<'PYEOF'
+      d…)
+  ⎿  Updated rag.py (+5 -2)
+      205  - A person's own profile (e.g. LinkedIn) lists their current p
+           osition ("Current role",
+      206    "... to present") as status "current" and earlier positions 
+           as "former".
+      207  - Copy names and titles exactly as written. Do not guess, infe
+           r, or invent titles.
+      208 +  If the role is at a subsidiary, business unit, or region, ke
+          +ep that scope in the title                                    
+      209 +  ("President and COO of TradePMR", "CFO, Robinhood Securities
+          +"), never shorten it to                                       
+      210 +  a bare company-wide title.                                  
+      211  - evidence: a short verbatim quote (copied character-for-chara
+           cter from the page text)
+      212    that shows this person's name and role. Do not paraphrase.
+      213  - department: the function they lead (e.g. "Engineering", "Fin
+           ance", "Sales").
+     ...
+      446              continue
+      447          last, added = parts.last, 0
+      448          for p in results:
+      446 -            key = p.url.rstrip("/")                           
+      449 +            key = search.page_key(p.url)                      
+      450              low = entities._ascii(p.text).lower()
+      451              if key in seen or last not in low or name.lower() 
+           not in low:
+      452                  continue
+     ...
+      502      # 3. Look for independent sources for weakly supported peo
+           ple, then resolve again.
+      503      targets = _weakly_supported(people, stats["excluded"], dom
+           ain)
+      504      if targets and search.tavily_available():
+      502 -        seen = {p["url"].rstrip("/") for p in report["pages"]}
+      505 +        seen = {search.page_key(p["url"]) for p in report["pag
+          +es"]}                                                         
+      506          extra = _corroborate(name, domain, targets, seen, clas
+           sifier, report, log)
+      507          if extra:
+      508              accepted += extra
+  ⎿  Updated search.py (+12 -3)
+      31  RESULTS_RESTRICTED = 10  # site- or domain-restricted queries
+      32  
+      33  
+      34 +def page_key(url: str) -> str:                                 
+      35 +    """Same page under country subdomains or www. (e.g. fx.link
+         +edin.com/company/x vs                                          
+      36 +    www.linkedin.com/company/x) gets one key: registrable domai
+         +n + path."""                                                   
+      37 +    from urllib.parse import urlparse                          
+      38 +                                                               
+      39 +    from entities import registrable_domain                    
+      40 +    return registrable_domain(url) + urlparse(url).path.rstrip(
+         +"/").lower()                                                   
+      41 +                                                               
+      42 +                                                               
+      43  def tavily_available() -> bool:
+      44      return bool(os.getenv("TAVILY_API_KEY"))
+      45  
+     ...
+      54  
+      55      client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
+      56      domain = bare_domain(company_url)
+      48 -    seen = {u.rstrip("/") for u in (seen_urls or set())}       
+      57 +    seen = {page_key(u) for u in (seen_urls or set())}         
+      58      pages: list[Page] = []
+      59  
+      60      for template, where in QUERY_TEMPLATES:
+     ...
+      74          new = 0
+      75          for r in resp.get("results", []):
+      76              url = (r.get("url") or "").rstrip("/")
+      68 -            if not url or url in seen:                         
+      77 +            if not url or page_key(url) in seen:               
+      78                  continue
+      79              # Prefer full page text; fall back to the search sn
+          ippet.
+      80              text = (r.get("raw_content") or r.get("content") or
+           "").strip()
+      81              # Cheap relevance filter: the page must at least me
+          ntion the company.
+      82              if company_name.lower() not in text.lower() and dom
+          ain not in text.lower():
+      83                  continue
+      75 -            seen.add(url)                                      
+      84 +            seen.add(page_key(url))                            
+      85              title = r.get("title") or ""
+      86              pages.append(Page(url, f"{title}\n{text}"[:MAX_CHAR
+          S_PER_PAGE],
+      87                                published=r.get("published_date")
+           or ""))
+  ⎿  … 1 more file changed
+
+  Ran 1 shell command (ctrl+o to expand)
+● This run excluded Alisa Bergman, Sanjay Kotte, Patrick Chan and R. Scott
+  Victoria, even though corroboration searches ran for each. Here's what those
+  searches returned:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Gemini rejected Sanjay Kotte's and Patrick Chan's LinkedIn profiles as
+  self-reported but accepted Alisa Bergman's, which conflicts with your decision
+  3. I'm also checking why R. Scott Victoria was excluded even though his pages
+  and profile were accepted, and why Erika Dean, Jeff Pinner and Dheerja Kaur
+  newly appear. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The three new people check out: they come from a Robinhood newsroom post dated
+  2025-06-12. R. Scott Victoria is excluded only because TradePMR is a
+  subsidiary, a limitation I'll leave as is, and I'm making the profile-evidence
+  rule deterministic next. · summary
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python - <<'PYEOF'
+      d…)
+  ⎿  Updated rag.py (+7 -1)
+      105  - reference: an encyclopedia (e.g. Wikipedia) or a reputable o
+           rganization's own page
+      106    about the person (investor portfolio page, university, confe
+           rence speaker page)
+      107  - professional_profile: a person's or company's own public pro
+           file (e.g. a public
+      108 -  LinkedIn page) that is readable without logging in          
+      108 +  LinkedIn page) that is readable without logging in. A person
+          +'s own profile is                                             
+      109 +  acceptable evidence of their own current position (it is cro
+          +ss-checked later).                                            
+      110  - people_data_aggregator: a site that compiles people or conta
+           ct data (emails, phone
+      111    numbers, employee/executive lists, org charts) from other so
+           urces, or an SEO page
+      112    listing a company's executives without original reporting
+     ...
+      140                  out.append(("other", False, "not assessed"))
+      141              elif not a.about_company:
+      142                  out.append((a.source_type, False, f"about a di
+           fferent organization: {a.reason}"))
+      143 +            elif a.source_type == "professional_profile":     
+      144 +                # Public profiles about the company are accept
+          +ed as self-reported evidence;                                 
+      145 +                # their claims are checked by the resolution r
+          +ules (current role,                                           
+      146 +                # contradictions, corroboration), not rejected
+          + here for being self-reported.                                
+      147 +                out.append((a.source_type, True, a.reason))   
+      148              else:
+      149                  out.append((a.source_type, a.credible, a.reaso
+           n))
+      150          return out
+  ⎿  Updated tests\test_leadership_rules.py (+13 -0)
+      255      assert results[1][1] is True
+      256  
+      257  
+      258 +def test_public_profiles_about_the_company_are_accepted(monkey
+          +patch):                                                       
+      259 +    import rag                                                
+      260 +    parsed = rag.SourceAssessments(pages=[                    
+      261 +        rag.SourceAssessment(index=0, source_type="professiona
+          +l_profile", about_company=True,                               
+      262 +                             credible=False, reason="self-repo
+          +rted information"),                                           
+      263 +        rag.SourceAssessment(index=1, source_type="professiona
+          +l_profile", about_company=False,                              
+      264 +                             credible=True, reason="a namesake
+          +'s profile")])                                                
+      265 +    monkeypatch.setattr(rag, "generate", lambda *a, **k: type(
+          +"R", (), {"parsed": parsed})())                               
+      266 +    results = rag.make_llm_classifier("Robinhood", "robinhood.
+          +com")(                                                        
+      267 +        [{"url": "https://linkedin.com/in/a", "text": "x"}, {"
+          +url": "https://linkedin.com/in/b", "text": "y"}])             
+      268 +    assert [r[1] for r in results] == [True, False]           
+      269 +                                                              
+      270 +                                                              
+      271  # ------------------------------------------------------------
+           ---- discovery & corroboration
+      272  
+      273  def test_discovery_searches_company_site_and_linkedin():
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Robinhood now has 30 people (13 C-level, 15 VPs, 2 department heads), none
+  flagged outdated and no sources in conflict. I'm checking R. Scott Victoria's
+  unscoped title next. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● R. Scott Victoria's profile says "President and COO at Robinhood," while the
+  TradePMR article gives the scoped title, so I'll keep the more specific one
+  and treat the bare title as no longer a company-wide claim, then re-check
+  Robinhood from stored records. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python - <<'PYEOF'
+      s…)
+  ⎿  Updated tests\test_leadership_rules.py (+15 -0)
+      202      assert all("Sources disagree on who is CTO" in p["conflict
+           "] for p in people)
+      203  
+      204  
+      205 +def test_scoped_title_is_shown_and_is_not_a_company_wide_role(
+          +):                                                            
+      206 +    people = resolve(_roster(                                 
+      207 +        rec("R. Scott Victoria", "President and COO", "https:/
+          +/www.linkedin.com/in/rscottvictoria",                         
+      208 +            source_type="professional_profile"),              
+      209 +        rec("R. Scott Victoria", "President and COO of TradePM
+          +R by Robinhood",                                              
+      210 +            "https://www.wealthtechstrategy.com/post/x", sourc
+          +e_type="news"),                                               
+      211 +        rec("Jane Roe", "Chief Operating Officer", ROSTER)))  
+      212 +    by = {p["name"]: p for p in people}                       
+      213 +    assert by["R. Scott Victoria"]["title"] == "President and 
+          +COO of TradePMR by Robinhood"                                 
+      214 +    assert not by["R. Scott Victoria"]["may_be_outdated"]  # d
+          +ated by the current profile                                   
+      215 +    assert not by["R. Scott Victoria"]["conflict"] and not by[
+          +"Jane Roe"]["conflict"]                                       
+      216 +    # the company's own name is not a scope                   
+      217 +    assert not entities._scope_of("CEO", "CEO of Robinhood", "
+          +robinhood.com")                                               
+      218 +                                                              
+      219 +                                                              
+      220  def test_scoped_cfo_titles_do_not_conflict():
+      221      people = resolve(_roster(rec("Roger Younan", "Crypto CFO",
+            ROSTER)))
+      222      assert all(not p["conflict"] for p in people) and len(peop
+           le) == 4
+  ⎿  … 1 more file changed
+
+● 111 tests pass; next I'll re-check Robinhood from its stored data, then do
+  NVIDIA and Anthropic, which are still on the old version, running the
+  Robinhood check twice to confirm it's stable. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● NVIDIA and Anthropic have been rechecked with board-only and founder-only
+  titles excluded. A regression surfaced where Vlad Tenev's title picked up
+  extra roles, so I'm fixing the scope rule to exclude title words. · summary
+
+● Bash(cd "c:/OneDrive/OneDrive - California State University,
+      Sacramento/Desktop/Work/Volt/project_Company Leadership RAG Agent" &&
+      .venv/Scripts/python - <<'PYEOF'
+      s…)
+  ⎿  Updated entities.py (+7 -0)
+      383      if not base or not longer.startswith(base + " "):
+      384          return False
+      385      extra = set(longer[len(base):].split()) - {"of", "at", "by
+           ", "the", "for", "inc", "llc"}
+      386 +    if extra & _TITLE_WORDS:                                  
+      387 +        return False  # more roles ("... Co-Founder and Presid
+          +ent"), not a scope                                            
+      388      return bool(extra - {company.split(".")[0]})
+      389  
+      390  
+      391 +_TITLE_WORDS = {"and", "founder", "co", "cofounder", "presiden
+          +t", "chairman", "chair", "ceo",                               
+      392 +                "officer", "chief", "director", "vp", "svp", "
+          +evp", "head", "secretary",                                    
+      393 +                "treasurer", "manager", "partner", "member", "
+          +board"}                                                       
+      394 +                                                              
+      395 +                                                              
+      396  def _is_own_profile(r: dict, parts: NameParts) -> bool:
+      397      """The person's own public profile (e.g. linkedin.com/in/j
+           ane-doe, janedoe.com),
+      398      not a company page or a post: the URL itself carries the p
+           erson's name."""
+  ⎿  Updated tests\test_leadership_rules.py (+4 -0)
+      215      assert not by["R. Scott Victoria"]["conflict"] and not by[
+           "Jane Roe"]["conflict"]
+      216      # the company's own name is not a scope
+      217      assert not entities._scope_of("CEO", "CEO of Robinhood", "
+           robinhood.com")
+      218 +    # more roles are not a scope                              
+      219 +    assert not entities._scope_of("Chairman & Chief Executive 
+          +Officer",                                                     
+      220 +                                  "Chairman, Chief Executive O
+          +fficer, Co-Founder, and President",                           
+      221 +                                  "robinhood.com")            
+      222  
+      223  
+      224  def test_scoped_cfo_titles_do_not_conflict():
+  ⎿  (timeout 10m)
+
+● Jensen Huang is missing from NVIDIA, which is wrong. Checking his records in
+  the pre-change backup:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The NVIDIA gap is a data issue, since Huang's CEO title was never collected
+  and re-collection isn't approved, so I'll flag it. Next I'm smoke-testing the
+  UI, including the new report expander and disagreement notes. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The UI renders all four companies without errors. The collection report shows
+  for the two companies re-collected today. Last, two live chat checks on the
+  questions you raised:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Everything is implemented and the collections ran again. 111 offline tests
+  pass (39 new), and two live chat checks gave correct answers: "15 Vice
+  Presidents" for Robinhood and "Paul Nichols" as Campfire's CTO, both from
+  stored data without a web search. Nothing is committed. The database was
+  backed up first, to
+  backups/leadership-before-v4-recollect-20261113-011128-566914.db.
+
+  Robinhood: 44 → 30 people (13 C-level, 15 VPs, 2 department heads; none
+  flagged outdated, no disagreements)
+  - Excluded because they aren't leadership roles (8 people): board-only members
+    such as Frei, Sandell and Rubinstein, plus Taylor Brown (Chief of Staff).
+  - Excluded because they're missing from the current official pages and have no
+    recent evidence (10 people): includes Christina Lai, Ashkenas, Zigaitis,
+    Bhatt (now Co-Founder only), Roger Younan and Joshua Topolsky.
+  - Kept: Carley Olivas and Nora Chan, because the official leadership page
+    shows them leading a function.
+  - Kept from their own LinkedIn profiles ("to present"): Alisa Bergman, Sanjay
+    Kotte and Patrick Chan.
+  - R. Scott Victoria now shows "President and COO of TradePMR by Robinhood".
+    His profile said only "President and COO"; a trade article gives the
+    subsidiary.
+  - Newly found in an official 2025 newsroom post: Jeff Pinner (CTO), Erika Dean
+    (Chief Security Officer) and Dheerja Kaur (VP of Product).
+  - VP counting: the 15 are counted from titles, not Gemini's labels. Matt
+    Billings is now counted; Christina Lai is gone.
+
+  Campfire: 5 → 6 people
+  - John Glasgow, CEO
+  - Paul Nichols, CTO — Campfire's own blog plus the company LinkedIn page
+  - Alexandra Roveda, VP Enterprise
+  - Chris McDonough, VP Sales — corroborated by 3 more sources
+  - Brendan Doyle, Head of Product (may be outdated)
+  - Rajalakshmi Venkatesh, Director, People & Talent — her own profile only; she
+    counts as a department head because Gemini judged she leads that function
+  - Fernando San Martin was excluded: his 2024 CTO claim is superseded by newer
+    evidence for Paul.
+
+  The five names you asked about:
+  - Paul C Nichols: found and included.
+  - Hank Sun: his profile was found, but it lists his current role as "Founding
+    Solution Consultant", so he isn't included.
+  - Jack Arrix and Irina Silva: not surfaced by this run's searches, so not
+    included.
+  - Erik Leavell: correctly excluded. The only title evidence is Campfire's
+    customer page calling him "Head of Finance at April".
+
+  What changed (the README is updated to match):
+  - Leadership is decided from the title in code: C-level, VP/SVP/EVP, or "Head
+    of".
+    - Senior Directors and other director-level titles count only if they lead a
+      function.
+    - Board-only, founder-only and Chief of Staff titles are excluded.
+  - Dates: the evidence date is now the page's own date, not a role's start
+    date, and future dates are ignored. A person's own profile listing a current
+    role counts as current, even with no date.
+  - Current roster: if a company has a live leadership page, people who aren't
+    on it and have no recent evidence are excluded.
+  - One-person roles: for CEO, CTO, CFO and the like, a newer claim by someone
+    else supersedes the old one. Cases that can't be decided are marked
+    "(sources disagree)", and so are profiles that contradict themselves.
+  - Sources:
+    - Gemini now also answers whether a page is about this company, so the
+      Brussels "Campfire AI" and Campfire Interactive are rejected.
+    - Only the URL can make a source official or a filing.
+    - Public profiles about the company are accepted; Gemini had been rejecting
+      some as "self-reported".
+  - Discovery:
+    - Two new searches: one restricted to the company's own site, one restricted
+      to LinkedIn.
+    - One extra search for each person backed by only one non-official source.
+    - The same page under different LinkedIn country subdomains is counted once.
+  - Collection report: a new UI expander lists sources and candidates found,
+    rejected and accepted, with reasons.
+    - Campfire: 53 sources found, 20 rejected; 29 candidate records; 1 person
+      excluded; 6 accepted.
+    - Robinhood: 65 sources, 20 rejected; 98 records, 7 rejected; 16 excluded;
+      30 accepted.
+
+  NVIDIA and Anthropic were re-checked from stored data only, not re-collected.
+  - Anthropic now has 14 people (2 founder-only titles excluded).
+  - NVIDIA dropped to 5, and Jensen Huang is missing. Your earlier NVIDIA
+    collection only captured "Director" and "Founder" for him, never his CEO
+    title, so the new rule finds no leadership role. Re-collecting NVIDIA would
+    fix this, but I need your approval for that.
+
+  Remaining limitations:
+  - Runs vary: my three Robinhood collections gave 27, 27 and 30 people as
+    Tavily and Gemini results changed.
+  - Subsidiary sites count as another company: pages on a subsidiary's own site
+    (e.g. tradepmr.com) are treated as a different company during extraction.
+  - Sources accepted by URL rules alone skip the same-company check, so a .gov
+    filing about a different "Campfire" was accepted. Extraction found nobody in
+    it, so nothing was stored.
+  - Profiles can be stale: a stale LinkedIn profile can't be detected unless
+    another source contradicts it.

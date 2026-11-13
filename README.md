@@ -1,31 +1,28 @@
 # Company Leadership RAG Agent
 
-Give it a company website URL. It finds the company's executives, VPs, and department heads in public sources: the company's own site, regulatory filings, news, reference pages, and public profiles. It checks each source's credibility before using it and stores every person in SQLite with the evidence and URLs behind them. A Streamlit chat answers questions from that data, from stored source passages, and, only when needed, from one targeted web search. Every fact is cited with a clickable source.
+Give it a company website URL. It finds the company's leadership - C-level executives, Vice Presidents (incl. SVPs/EVPs), and heads of departments - in public sources: the company's own site, regulatory filings, news, reference pages, and public profiles. It checks each source's credibility before using it and stores every person in SQLite with the evidence and URLs behind them. A Streamlit chat answers questions from that data, from stored source passages, and, only when needed, from one targeted web search. Every fact is cited with a clickable source.
 
 ## Quick start
+
+Requires **Python 3.10+**.
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate            # Windows  (macOS/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
+cp .env.example .env              # then add your keys (Windows: copy .env.example .env)
 ```
 
-Create `.env`:
-
-```
-GEMINI_API_KEY=your-key-here
-TAVILY_API_KEY=your-key-here      # optional; without it, only the site crawler and Wikipedia are used,
-                                  # and the chat can't search the web
-# optional; defaults to gemini-3.5-flash, with automatic fallback and retry
-GEMINI_MODEL=gemini-3.5-flash
-```
+`.env` holds `GEMINI_API_KEY` (required), `TAVILY_API_KEY` (optional; without it only the site crawler and Wikipedia are used, and the chat can't search the web), and `GEMINI_MODEL` (optional; defaults to `gemini-3.5-flash`, with automatic fallback and retry).
 
 Run:
 
 ```bash
 streamlit run app.py
-python -m pytest tests -q          # 72 offline tests; no API keys needed
+python -m pytest tests -q          # 115 offline tests; no API keys needed
 ```
+
+**Real LLMs only.** The app always calls Gemini (extraction, source assessment, entity checks, answers). Fake LLM and search functions exist only in the offline unit tests under `tests/`, so the tests run without keys or network.
 
 Enter a URL such as `meetcampfire.com` in the sidebar and click **Collect**. Then ask questions such as *"Who is the CEO?"*, *"How many VPs are listed?"*, or *"Where is their CEO based?"*
 
@@ -43,7 +40,7 @@ Question ──► rag.answer: SQLite people + exact counts ─► stored passag
 | File | Role |
 |---|---|
 | `scraper.py` | Crawls the company site (`robots.txt`, keyword-scored links, common leadership paths). Redirects to other sites are dropped. Also fetches Wikipedia when the article links to the company's domain. |
-| `search.py` | Tavily. At collection time it runs 6 query templates built from the company name and domain, phrased to surface primary sources (leadership pages, appointment announcements, filings). At answer time it runs one targeted search (`web_search`). Tavily is only used to find pages; its results are judged like any other source. |
+| `search.py` | Tavily. At collection time it runs 8 query templates built from the company name and domain, phrased to surface primary sources: leadership pages, appointment announcements (incl. marketing leadership), filings, the company's own pages that name officers (e.g. blog posts), and public LinkedIn profiles. `web_search` runs one targeted search, used to corroborate weakly supported people and as the chat fallback. Tavily is only used to find pages; its results are judged like any other source. |
 | `source_policy.py` | Decides whether a page may be used as evidence (see below), and keeps only the relevant passages of accepted pages. |
 | `rag.py` | Collection pipeline, Gemini extraction, source classifier, entity resolver, clean-up of stored data, and hybrid answering. |
 | `entities.py` | Entity resolution and title freshness (see below). Makes no network calls; the LLM functions are passed in. |
@@ -59,8 +56,9 @@ There is no domain blocklist. Every page, including the final URL after a redire
    - pages with no readable content, or behind a login wall, are rejected;
    - the company's own domain (any subdomain) is accepted as *official*;
    - `.gov` domains (e.g. SEC filings) are accepted as *regulatory*;
+   - only these URL rules can make a source official or regulatory (the most trusted tier), never an LLM label;
    - pages that look like contact or people-data listings (email formats, phone numbers, "reveal contact", employee directories) are rejected, judged by URL and content patterns.
-2. **Gemini assessment, only for unclear pages, in batches.** Each page is labeled *news*, *reference*, *professional_profile* (e.g. a public LinkedIn page readable without login), *people_data_aggregator*, or *other*, together with whether it is credible. Only credible news, reference, and profile pages are accepted. A people-data aggregator is never evidence, even if marked credible: such claims count only when an authoritative source shows the same thing, and that source then stands on its own.
+2. **Gemini assessment, only for unclear pages, in batches.** Each page is labeled *news*, *reference*, *professional_profile* (e.g. a public LinkedIn page readable without login), *people_data_aggregator*, or *other*, together with whether it is **about this company** (not a namesake such as "Campfire Interactive") and whether it is credible. Only credible news, reference, and profile pages about the company are accepted. A people-data aggregator is never evidence, even if marked credible: such claims count only when an authoritative source shows the same thing, and that source then stands on its own.
 3. **If the assessment fails, unclear pages are rejected.** Unverified sources are never used.
 
 ## Avoiding hallucination
@@ -75,12 +73,28 @@ A leadership record is stored only if **all** of these hold:
 
 Source URLs are attached by the code, never written by the model. The app never claims the list is complete. Counts are worded "listed in the collected sources".
 
+## Who counts as leadership
+
+The level is decided **from the title, in code** (`entities.leadership_level`), not by the LLM, so counts are deterministic:
+- **C-level**: Chief … Officer, CEO/CFO/CTO/…, or President (incl. presidents of subsidiaries).
+- **VP**: Vice President, SVP, EVP. A plain "Vice President and Chief X Officer" has VP rank.
+- **Department head**: "Head of …"; or a Director / Senior Director / General Manager only when the title or page shows they lead a department or function (e.g. "Senior Director, Communications" on the company's leadership page).
+- **Not leadership**: board-only members, founder-only titles, Chief of Staff, and directors' jobs at other organizations listed in proxy statements. These people are excluded.
+
 ## Current vs. outdated roles
 
 The database stores no status. Freshness is computed from evidence dates when the data is read.
-- **Outdated roles are not stored.** If a credible source says a person no longer holds a role ("former", "stepped down") and that source is at least as new as the claim, the role is dropped. People with only former roles are excluded.
+- **Evidence date = when the source said it**: the page's publication or filing date, not a role's start date ("director since 2016"). Future dates are ignored.
+- **Current evidence**: a live company page (as of the day it was fetched), the person's own public profile that lists the role as current (e.g. LinkedIn "to present", even without a date), or a source dated within the last 2 years (`STALE_AFTER_DAYS`). Anything else is shown "(may be outdated)".
+- **Outdated roles are not stored.** A role is dropped when a credible source says it ended ("former", "stepped down", an 8-K "separating from his position") and is at least as new as the claim; "Chief Technology Officer" and "CTO" count as the same role. The departure evidence itself is kept as a hidden row (`role_history.ended`), so later re-checks still apply it; it is never shown as a role.
+- **Current roster.** If the company has a live roster page (3+ people listed on a non-article company page), people who are on no live company page and have no current evidence are excluded - e.g. officers from an old proxy or a 2020 appointment announcement.
+- **One-person roles.** If different people claim the same company-wide role (CEO, CFO, CTO, COO, CMO, CIO, CISO, CLO, General Counsel), the newer dated claim wins and the older one is dropped (the person is excluded if no other leadership role remains). If it can't be decided, both are flagged.
+- **Disagreeing sources are flagged, not hidden**: e.g. a profile saying "Head of Solution Consulting" and "Founding Solution Consultant". The table shows "(sources disagree)" and the chat says so.
 - **The current title** comes from the most authoritative source (official/filing first), then the newest.
-- **"(may be outdated)"** is added to a title unless it is backed by a live company page (counted as of the day it was fetched) or a source dated within the last 2 years (`STALE_AFTER_DAYS`). Old press releases and undated third-party profiles are therefore flagged.
+
+## Corroboration
+
+After extraction, people backed by a single non-official source - and people excluded only for lack of current evidence whose sources are all non-official - get one targeted search (up to 10 per collection). New pages must mention the person and the company and pass the same source policy; entity resolution then runs again on all records.
 
 ## Entity resolution (`entities.py`)
 
@@ -94,6 +108,8 @@ The database stores no status. Freshness is computed from evidence dates when th
 - Entity resolution runs again, and merged people keep their lowest ID.
 - Pages are trimmed to relevant passages.
 - If the source check fails, nothing changes and it is retried later.
+
+`rag.reextract_company(id)` re-runs extraction over the stored source passages (Gemini only, no crawling or search) and resolves the results with the stored records - used when evidence the stored records lack must be recovered after a rule change.
 
 ## Hybrid answering (`rag.answer`)
 
@@ -116,14 +132,16 @@ The database stores no status. Freshness is computed from evidence dates when th
 
 ## Database
 
-`companies` (incl. `resolved_version`, `removed_unverified`), `leaders` (one row per person), `role_history` (supporting evidence per source: title, `as_of`, source type, quote), `sources` (accepted sources as passages, with `source_type`, `published`, `origin`), and `search_cache`.
+`companies` (incl. `resolved_version`, `removed_unverified`, `collection_report`), `leaders` (one row per person; `seniority` is the title-based level, `conflict` an unresolved source disagreement), `role_history` (supporting evidence per source: title, `as_of`, source type, quote), `sources` (accepted sources as passages, with `source_type`, `published`, `origin`), and `search_cache`.
 
 Migrations run automatically, are safe to rerun, and copy the database to `backups/` before any destructive step. The `status` columns were removed this way, along with the former-role rows they marked.
 
 ## Limitations / next steps
 
 - **Collections vary between runs.** Tavily results and Gemini judgments change, so collecting twice can give slightly different people. Gemini overloads (503) are retried, but extraction can still fail for a page.
-- **Being dropped from a roster isn't detected.** If a newer filing simply omits a former director, there is no explicit "former" statement, so the old record stays and is flagged "(may be outdated)".
+- **Roster detection needs a roster page.** For companies without a live leadership page (e.g. small startups), people with only old evidence are kept and flagged "(may be outdated)" rather than excluded.
+- **Self-reported profiles.** A current LinkedIn position counts as current evidence; it is corroborated when another source can be found, and contradictions are flagged, but a profile that is simply stale can't be detected.
+- **Discovery is bounded.** 8 company-level searches plus up to 10 corroboration searches can still miss people who appear only on individual profiles.
 - **Dates are best-effort.** They come from the page or Tavily, and a missing date leads to "may be outdated".
 - **The source classifier is an LLM judgment.** A wrong rejection loses evidence; it never invents a record.
 - **The crawler can't render JavaScript.** Sites that build their team page with JavaScript, or that block bots, yield little crawler text; Tavily often makes up for it.

@@ -10,8 +10,11 @@ Two layers, applied before extraction and storage:
      phone numbers, "reveal contact" prompts) - judged by URL and content
      patterns, not by a domain blocklist.
 2. LLM assessment (batched) for everything else: the classifier labels each page
-   (news, reference, public professional profile, people-data aggregator, ...)
-   and whether it is credible. Only credible pages of accepted types are used.
+   (news, reference, public professional profile, people-data aggregator, ...),
+   whether it is about this company (not a namesake), and whether it is credible.
+   Only credible pages about the company, of accepted types, are used. The LLM can
+   never make a page "official" or "regulatory": those labels (and the trust that
+   comes with them) are decided by the URL rules alone.
 
 If the classifier is unavailable or fails, ambiguous pages are rejected:
 unverified sources are never used as evidence.
@@ -110,9 +113,22 @@ def evaluate(items: list[dict], company_domain: str, classifier: Classifier | No
                 verdicts[i] = Verdict(False, "other", "could not be verified", "fallback")
                 continue
             stype, credible, reason = results[n]
-            stype = stype if stype in SOURCE_TYPES else "other"
+            stype = trusted_type(items[i]["url"], stype, company_domain)
             verdicts[i] = Verdict(credible and stype in ACCEPTED_TYPES, stype, reason, "llm")
     return verdicts  # type: ignore[return-value]
+
+
+def trusted_type(url: str, source_type: str, company_domain: str) -> str:
+    """"official" only for the company's own domain and "regulatory" only for
+    government domains; the same label from an LLM becomes "reference"."""
+    source_type = source_type if source_type in SOURCE_TYPES else "other"
+    if source_type in ("official", "regulatory"):
+        if registrable_domain(url) == registrable_domain(company_domain):
+            return "official"
+        if _host(url).endswith(".gov"):
+            return "regulatory"
+        return "reference"
+    return source_type
 
 
 # ---------------------------------------------------------------- passages
