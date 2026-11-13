@@ -65,16 +65,28 @@ At answer time, Gemini says plainly when the data has no answer. When sources di
 The same person often appears under different names across sources ("Dan" vs. "Daniel" Gallagher, "Baiju Bhat" vs. "Bhatt", "Vlad" vs. "Vladimir" Tenev). Resolution has two steps.
 
 1. **Rule-based (exact) matching.** Names are cleaned up: accents, punctuation, honorifics (Dr.), credentials (", CFA", PhD), and middle initials are removed. Nicknames in parentheses are kept as aliases. Records with the same cleaned first and last name merge with no LLM call.
-2. **Gemini check, only for unclear pairs.** A pair counts as unclear when the first names are related (same, a common nickname, or a prefix of 3+ letters, like Dan/Daniel) **and** the surnames match or are 1–2 letters apart (Bhat/Bhatt). Gemini gets both groups' titles, dates, evidence quotes, and sources, and is told that a similar name alone is not enough. The records merge only on a **high-confidence** "same person". On any other answer, or if the call fails, they stay separate. Names that are not similar (Daniel Kelati vs. Daniel Gallagher) are never sent to the check.
+2. **Gemini check, only for unclear pairs.** A pair counts as unclear when the surnames match or are 1–2 letters apart (Bhat/Bhatt) **and** either:
+   - the first names are related: same, a common nickname, or a prefix of 3+ letters (Dan/Daniel, Vlad/Vladimir); **or**
+   - the roles overlap on a specific word. Generic title words (director, president, chief, officer, vice, senior, board…) are ignored, and C-suite phrases are shortened ("Chief Executive Officer" → `ceo`). This catches alternative name forms such as a legal or transliterated name vs. the commonly used one (Jen-Hsun/Jensen Huang, both "founder … CEO"; Ajay/Jay Puri, both "Worldwide Field Operations").
+
+   A shared surname alone, or a shared title alone, never makes a pair a candidate. Gemini gets both groups' titles, dates, evidence quotes, and sources, and is told that a similar name alone is not enough. The records merge only on a **high-confidence** "same person". On any other answer, or if the call fails, they stay separate. Names that are not similar (Daniel Kelati vs. Daniel Gallagher) are never sent to the check.
 
 **Combining a merged person.**
-- The canonical name is the spelling with the most trusted support. Other spellings become `aliases`. All source URLs and all reported titles are kept (`role_history`).
+- The canonical name is the spelling the **company's own site** uses, then filings (which often use legal names), then news, then aggregators. Within a level, the most frequent spelling wins. Other spellings become `aliases`. All source URLs and all reported titles are kept (`role_history`).
 - **Source trust levels** are set by domain type only: (1) the company's own domain, including subdomains like `investors.`, plus sec.gov; (2) news and reference sites; (3) data brokers and social sites (LinkedIn, RocketReach, Comparably…).
 - **Current title** = the most trusted non-former record, then the newest. A live (non-article) page on the company's own site counts as evidence as of the day it was fetched. If a source says a title is former and is at least as new as an older claim of the same title, that older "current" claim is demoted.
 - **Status:**
   - `current`: supported by the live company site or a source from the last 2 years.
   - `unverified`: only old or undated third-party evidence, such as a 2019 press release or an undated LinkedIn snippet.
   - `former`: every source says the person no longer holds the role.
+
+**Canonical person IDs.** `leaders.id` is the person ID. `role_history` uses the same ID, the table shows it (`P132`), and the chat context tags each person `[P132]`, so the database, the table, and the chatbot always refer to the same person.
+
+**Re-resolving stored data.** `companies.resolved_version` records which version of the resolution logic ran (`entities.RESOLUTION_VERSION`). When the logic changes, the app re-resolves outdated companies on load, using **stored records only**, with no re-collection. The sidebar's **Re-run deduplication** button does the same on demand, or you can call `rag.reresolve_company(id)` from code.
+- Records are rebuilt from `role_history`. Rows stored before role histories existed are rebuilt from the leader row and its extra source URLs.
+- Statuses are evaluated as of the original collection date.
+- Merged people keep their **lowest existing ID**, so IDs stay stable.
+- A company is marked done only if no Gemini check failed, so failed checks are retried.
 
 The chatbot is given explicit counts ("UNIQUE PEOPLE: 47 (33 current, 14 unverified, 0 former)") with one bullet per person. It is told to count people, never aliases, sources, or titles.
 
@@ -85,7 +97,11 @@ pip install pytest
 python -m pytest tests -q
 ```
 
-`tests/test_entities.py` runs offline with a fake resolver. It covers:
+`tests/test_entities.py` and `tests/test_name_variants.py` run offline with a fake resolver. They cover:
+- Jen-Hsun/Jensen Huang, including a no-hyphen "JenHsun" form found only through role overlap, with "Jensen Huang" as the canonical name. Also Dan/Daniel Gallagher, Vlad/Vladimir Tenev, and Baiju Bhat/Bhatt.
+- People who share a surname (with unrelated roles, or with only a generic title like "Director") and people who share a title are never sent to the check.
+- Re-resolution of legacy stored rows: lowest ID kept, re-runs give the same result, and a failed check is retried later.
+- The same person IDs in the database, role history, and chat context.
 - Dan/Daniel Gallagher and Baiju Bhat/Bhatt: flagged for review, merged only when the check confirms, aliases, sources, and role history kept.
 - Similar or same-title names that are different people are never merged.
 - A resolver failure leaves records separate.

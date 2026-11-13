@@ -10,6 +10,20 @@ import rag
 st.set_page_config(page_title="Company Leadership RAG Agent", page_icon="🏢", layout="wide")
 db.init_db()
 
+# Data stored by older versions of the entity-resolution logic is re-resolved once
+# (stored records only - nothing is re-collected).
+if not st.session_state.get("reresolved"):
+    outdated = [c for c in db.list_companies()
+                if (c.get("resolved_version") or 0) < entities.RESOLUTION_VERSION]
+    if outdated:
+        with st.status("Updating deduplication for previously collected companies...") as s:
+            try:
+                rag.reresolve_outdated(log=st.write)
+                s.update(label="Deduplication up to date", state="complete")
+            except Exception as e:
+                s.update(label=f"Deduplication update failed: {e}", state="error")
+    st.session_state.reresolved = True
+
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
     st.header("1. Collect leadership")
@@ -41,6 +55,15 @@ with st.sidebar:
         if chosen != st.session_state.get("company_id"):
             st.session_state.company_id = chosen
             st.session_state.messages = []
+        if st.button("Re-run deduplication", help="Re-resolve duplicate people in the "
+                     "stored records for this company, without re-collecting."):
+            with st.status("Re-running entity resolution...", expanded=True) as s:
+                try:
+                    rag.reresolve_company(chosen, log=st.write)
+                    s.update(label="Deduplication complete", state="complete")
+                except Exception as e:
+                    s.update(label="Deduplication failed", state="error")
+                    st.error(str(e))
     else:
         st.caption("No companies collected yet.")
 
@@ -57,11 +80,12 @@ label = (f"Leadership table ({len(leaders)} unique people: {counts['current']} c
          f"{counts['unverified']} unverified, {counts['former']} former)")
 with st.expander(label, expanded=not leaders or len(leaders) < 15):
     if leaders:
-        df = pd.DataFrame(leaders).drop(columns=["id"])
+        df = pd.DataFrame(leaders)
         df["source_urls"] = df["source_urls"].fillna("").str.split("\n")
         st.dataframe(
             df,
             column_config={
+                "person_id": st.column_config.NumberColumn("ID", format="P%d"),
                 "aliases": st.column_config.ListColumn("also written as"),
                 "title": st.column_config.TextColumn("current title"),
                 "source_url": st.column_config.LinkColumn("primary source"),
@@ -74,11 +98,12 @@ with st.expander(label, expanded=not leaders or len(leaders) < 15):
         roles = db.get_role_history(company_id)
         if roles:
             with st.popover("Role history (all reported titles by source)"):
-                rdf = pd.DataFrame(roles).drop(columns=["leader_id"])
+                rdf = pd.DataFrame(roles)
                 rdf["source_tier"] = rdf["source_tier"].map(entities.TIER_LABEL)
                 rdf["is_current_title"] = rdf["is_current_title"].astype(bool)
                 st.dataframe(rdf, hide_index=True, width="stretch",
-                             column_config={"source_url": st.column_config.LinkColumn("source")})
+                             column_config={"person_id": st.column_config.NumberColumn("ID", format="P%d"),
+                                            "source_url": st.column_config.LinkColumn("source")})
     else:
         st.warning(
             "No leaders found. The site may render its team page with JavaScript, "

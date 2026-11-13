@@ -4,10 +4,11 @@ Stage 1 (deterministic): names are normalized (accents, punctuation, honorifics,
 credentials, middle initials removed) and records with the same normalized
 first + last name are merged.
 
-Stage 2 (LLM-assisted, only for ambiguous clusters): clusters whose names are
-*similar but not identical* - nickname or prefix first names ("Dan"/"Daniel"),
-or surnames one or two letters apart ("Bhat"/"Bhatt") - are sent to a resolver
-together with their titles, evidence quotes, and sources. They merge only if
+Stage 2 (LLM-assisted, only for ambiguous clusters): clusters with similar
+surnames AND either related first names (nickname/prefix: "Dan"/"Daniel") or an
+overlapping, specific role ("Jen-Hsun"/"Jensen" Huang, both "founder ... CEO")
+are sent to a resolver together with their titles, evidence quotes, and sources.
+A shared surname or a shared title alone never makes a candidate. They merge only if
 the resolver confirms they are the same person. With no resolver, or on any
 error, they stay separate: a similar name alone never merges two people.
 
@@ -153,13 +154,46 @@ def surnames_similar(a: str, b: str) -> bool:
     return (n >= 4 and d <= 1) or (n >= 8 and d <= 2)
 
 
-def is_candidate_pair(a: NameParts, b: NameParts) -> bool:
-    """Similar enough to deserve an evidence-based check; never merged on this alone."""
+# Words too common in titles to indicate the same role on their own.
+_GENERIC_ROLE_WORDS = {
+    "and", "of", "the", "for", "to", "at", "in", "a", "an", "co",
+    "director", "directors", "board", "member", "independent", "non", "executive",
+    "senior", "sr", "vice", "president", "vp", "svp", "evp", "chief", "officer", "head",
+    "lead", "manager", "general", "group", "deputy", "associate", "assistant", "office",
+}
+_CSUITE = re.compile(r"\bchief (executive|financial|operating|technology|marketing|"
+                     r"information|legal|people|product|revenue|security|"
+                     r"accounting|investment|scientific|science) officer\b")
+
+
+def role_tokens(title: str) -> set[str]:
+    """Distinctive words of a title: 'Founder, President and Chief Executive Officer'
+    -> {'founder', 'ceo'}; 'Director' -> set()."""
+    t = _ascii(title).lower().replace("co-founder", "founder").replace("cofounder", "founder")
+    t = _CSUITE.sub(lambda m: f"c{m[1][0]}o {m[1]}", t)  # keep the function word too
+    return {w for w in re.findall(r"[a-z]+", t) if w not in _GENERIC_ROLE_WORDS and len(w) > 1}
+
+
+def roles_overlap(titles_a, titles_b) -> bool:
+    ta = set().union(*(role_tokens(t) for t in titles_a)) if titles_a else set()
+    tb = set().union(*(role_tokens(t) for t in titles_b)) if titles_b else set()
+    return bool(ta & tb)
+
+
+def is_candidate_pair(a: NameParts, b: NameParts, titles_a=(), titles_b=()) -> bool:
+    """Similar enough to deserve an evidence-based check; never merged on this alone.
+
+    Requires similar surnames AND (related first names OR an overlapping specific
+    role). Same surname with unrelated roles, or the same title with a different
+    surname, is never a candidate.
+    """
     if a.key == b.key:
         return False  # already merged deterministically
+    if not surnames_similar(a.last, b.last):
+        return False
     firsts = first_names_related(a.first, b.first) or a.first in b.nicknames \
         or b.first in a.nicknames
-    return firsts and surnames_similar(a.last, b.last)
+    return firsts or roles_overlap(titles_a, titles_b)
 
 
 # ---------------------------------------------------------------- sources & dates
@@ -175,6 +209,7 @@ _ARTICLE_PATH = re.compile(
     r"/(blog|news|newsroom|press|press-releases?|articles?|posts?|stories|insights|"
     r"announcements?|media)(/|$)", re.I)
 TIER_LABEL = {1: "company/official", 2: "news/reference", 3: "aggregator/social"}
+RESOLUTION_VERSION = 2  # bump when resolution logic changes; stored data is re-resolved
 
 
 def registrable_domain(url_or_host: str) -> str:
@@ -185,6 +220,14 @@ def registrable_domain(url_or_host: str) -> str:
             "co", "com", "org", "net", "ac", "gov", "edu"}:
         return ".".join(labels[-3:])
     return ".".join(labels[-2:])
+
+
+def name_authority(url: str, company_domain: str) -> int:
+    """For choosing a display name: the company's own site (how it refers to its
+    people) > filings (often legal names) > news > aggregators."""
+    if registrable_domain(url) == registrable_domain(company_domain):
+        return 0
+    return source_tier(url, company_domain)  # sec.gov -> 1, news -> 2, aggregator -> 3
 
 
 def source_tier(url: str, company_domain: str) -> int:
@@ -252,8 +295,15 @@ def _record_date(r: dict, fetched: tuple[int, int, int]) -> tuple[int, int, int]
 
 def resolve_people(records: list[dict], company_domain: str, company_name: str = "",
                    resolver: Resolver | None = None, fetched_on: date | None = None,
-                   log: Callable[[str], None] = lambda _m: None) -> list[dict]:
-    """Group per-source records into unique people (see module docstring)."""
+                   log: Callable[[str], None] = lambda _m: None,
+                   stats: dict | None = None) -> list[dict]:
+    """Group per-source records into unique people (see module docstring).
+
+    Records may carry `person_id` (existing DB id - the merged person keeps the
+    lowest), `aliases`, and `extra_sources` (supporting URLs without a title).
+    `stats`, if given, is filled with checked/merged/failed counts."""
+    stats = stats if stats is not None else {}
+    stats.update(checked=0, merged=0, failed=0)
     fetched = (fetched_on or date.today()).timetuple()[:3]
     at_company = re.compile(rf"\s+(at|@)\s+{re.escape(company_name)}\.?$", re.I) \
         if company_name else None
@@ -272,6 +322,7 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
             r["title"] = at_company.sub("", r["title"])  # "CTO at Acme" -> "CTO"
         r["status"] = r.get("status") or "unknown"
         r["tier"] = source_tier(r["source_url"], company_domain)
+        r["authority"] = name_authority(r["source_url"], company_domain)
         r["date"] = _record_date(r, fetched)
         clusters.setdefault(parts.key, []).append(r)
         parts_of.setdefault(parts.key, parts)
@@ -288,19 +339,24 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
     keys = sorted(clusters)
     for i, a in enumerate(keys):
         for b in keys[i + 1:]:
-            if find(a) == find(b) or not is_candidate_pair(parts_of[a], parts_of[b]):
+            if find(a) == find(b) or not is_candidate_pair(
+                    parts_of[a], parts_of[b],
+                    [r["title"] for r in clusters[a]], [r["title"] for r in clusters[b]]):
                 continue
             label = f"{clusters[a][0]['name']} / {clusters[b][0]['name']}"
             if resolver is None:
                 log(f"Possible duplicate kept separate (no resolver): {label}")
                 continue
+            stats["checked"] += 1
             try:
                 same, reason = resolver(clusters[a], clusters[b])
             except Exception as e:  # conservative: never merge on failure
+                stats["failed"] += 1
                 log(f"Entity check failed for {label}: {e} - kept separate")
                 continue
             log(f"{'Merged' if same else 'Kept separate'}: {label} ({reason})")
             if same:
+                stats["merged"] += 1
                 parent[find(b)] = find(a)
 
     merged: dict[str, list[dict]] = {}
@@ -338,8 +394,14 @@ def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> dict:
     spellings: dict[str, list[dict]] = {}
     for r in recs:
         spellings.setdefault(r["name"], []).append(r)
-    canonical = min(spellings, key=lambda n: (
-        min(x["tier"] for x in spellings[n]), -len(spellings[n]), -len(n)))
+    # Prefer the name the company itself uses, then filings, news, aggregators;
+    # within a level, the most frequently used spelling.
+    def name_rank(n: str):
+        best_auth = min(x["authority"] for x in spellings[n])
+        return (best_auth, -sum(x["authority"] == best_auth for x in spellings[n]),
+                -len(spellings[n]), n)
+    canonical = min(spellings, key=name_rank)
+    all_names = set(spellings).union(*(set(r.get("aliases") or []) for r in recs))
 
     roles, seen = [], set()
     for r in sorted(recs, key=rank):
@@ -349,7 +411,7 @@ def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> dict:
         seen.add(k)
         roles.append({
             # only dates actually stated by the source (not the fetch-date fallback)
-            "title": r["title"], "status": r["status"],
+            "name": r["name"], "title": r["title"], "status": r["status"],
             "as_of": format_date(parse_date(r.get("as_of"))),
             "source_url": r["source_url"], "source_tier": r["tier"],
             "evidence": r.get("evidence") or "", "is_current_title": r is best,
@@ -357,8 +419,9 @@ def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> dict:
 
     by_rank = sorted(recs, key=rank)
     return {
+        "id": min((r["person_id"] for r in recs if r.get("person_id")), default=None),
         "name": canonical,
-        "aliases": sorted(n for n in spellings if n != canonical),
+        "aliases": sorted(n for n in all_names if n != canonical),
         "title": best["title"],
         "status": "former" if not active
         else "current" if _is_recent(best["date"], fetched) else "unverified",
@@ -367,7 +430,9 @@ def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> dict:
             (r["department"] for r in by_rank if r.get("department")), ""),
         "seniority": best.get("seniority") or "other",
         "source_url": best["source_url"],
-        "source_urls": list(dict.fromkeys(r["source_url"] for r in by_rank)),
+        "source_urls": list(dict.fromkeys(
+            [r["source_url"] for r in by_rank] + [u for r in by_rank
+                                                  for u in r.get("extra_sources") or []])),
         "evidence": best.get("evidence") or "",
         "roles": roles,
     }

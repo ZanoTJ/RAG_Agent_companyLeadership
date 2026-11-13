@@ -4,6 +4,7 @@ import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from typing import Literal
 
 from dotenv import load_dotenv
@@ -178,8 +179,12 @@ Rules:
   story, a plausible title progression) supports same_person=true.
 - Different roles that two different people could hold at the same time (e.g. one is
   "Head of Data Science", the other "Chief Legal Officer") mean same_person=false.
-- Nicknames (Dan/Daniel) and one-letter spelling differences (a typo on one site)
-  are common for the same person, but still require supporting evidence.
+- Nicknames (Dan/Daniel), one-letter spelling differences (a typo on one site), and
+  alternative name forms (a legal or transliterated name in filings vs. the commonly
+  used name on the company's website or in the press) are common for the same person,
+  but still require supporting evidence such as the same distinctive role.
+- Sharing a surname or a generic title (e.g. "Director") is NOT evidence by itself;
+  relatives and unrelated colleagues can share surnames.
 - confidence "high" only if the evidence clearly shows one person.
 
 GROUP A:
@@ -262,14 +267,55 @@ def ingest_company(url: str, log=print) -> int:
             note = f", {rejected} rejected (not supported by page text)" if rejected else ""
             log(f"{page.url}: {len(people)} verified{note}")
 
+    stats: dict = {}
     people = entities.resolve_people(found, domain, name,
-                                     resolver=make_llm_resolver(name, domain), log=log)
+                                     resolver=make_llm_resolver(name, domain), log=log,
+                                     stats=stats)
     stored = db.save_people(company_id, people)
-    counts = {s: sum(p["status"] == s for p in people) for s in ("current", "unverified", "former")}
-    log(f"Done. {len(found)} source records -> {stored} unique people "
-        f"({counts['current']} current, {counts['unverified']} unverified, "
-        f"{counts['former']} former) stored for {name}.")
+    if not stats["failed"]:  # otherwise re-resolution retries the failed checks later
+        db.set_resolved_version(company_id, entities.RESOLUTION_VERSION)
+    _log_counts(log, f"{len(found)} source records", stored, people, name)
     return company_id
+
+
+def _log_counts(log, what: str, stored: int, people: list[dict], name: str) -> None:
+    counts = {s: sum(p["status"] == s for p in people) for s in ("current", "unverified", "former")}
+    log(f"Done. {what} -> {stored} unique people ({counts['current']} current, "
+        f"{counts['unverified']} unverified, {counts['former']} former) for {name}.")
+
+
+def reresolve_company(company_id: int, resolver=None, log=print) -> dict:
+    """Re-run entity resolution over a company's STORED records (no re-collection).
+
+    Merged people keep their lowest existing ID; aliases, sources, and role history
+    are preserved. Statuses are evaluated as of the original collection date.
+    Returns resolution stats (checked / merged / failed)."""
+    db.init_db()
+    company = db.get_company(company_id)
+    domain = scraper.bare_domain(company["url"])
+    records = db.load_resolution_records(company_id)
+    collected = datetime.fromisoformat(company["scraped_at"]).date() \
+        if company.get("scraped_at") else None
+    stats: dict = {}
+    people = entities.resolve_people(
+        records, domain, company["name"],
+        resolver=resolver or make_llm_resolver(company["name"], domain),
+        fetched_on=collected, log=log, stats=stats)
+    stored = db.replace_people(company_id, people)
+    if not stats["failed"]:
+        db.set_resolved_version(company_id, entities.RESOLUTION_VERSION)
+    _log_counts(log, f"{len(records)} stored records", stored, people, company["name"])
+    return stats
+
+
+def reresolve_outdated(log=print) -> list[int]:
+    """Re-resolve every company whose data predates the current resolution logic."""
+    db.init_db()
+    ids = [c["id"] for c in db.list_companies()
+           if (c.get("resolved_version") or 0) < entities.RESOLUTION_VERSION]
+    for cid in ids:
+        reresolve_company(cid, log=log)
+    return ids
 
 
 # ================================================================ answering
@@ -283,9 +329,10 @@ web pages, plus excerpts of those pages). Rules:
 - Sources include third-party sites (news, LinkedIn, data aggregators). Prefer the company's
   own website when sources disagree. If two people appear to hold the same role, report both
   with their sources and say the information may be conflicting or outdated.
-- Each entry in the PEOPLE list is ONE unique person. Aliases are other spellings of the
-  same person, and a person may have several sources and titles. When counting people,
-  use the counts given in the context; never count aliases, sources, or titles as people.
+- Each entry in the PEOPLE list is ONE unique person with a person ID like [P12]. Aliases
+  are other spellings of the same person, and a person may have several sources and
+  titles. When counting people, use the counts given in the context; never count
+  aliases, sources, or titles as people. Different IDs are different people.
 - status "current": confirmed by the company's own pages or a recent source.
   "unverified": only old or undated third-party sources - say the role may be outdated.
   "former": sources say they no longer hold the role.
@@ -322,7 +369,7 @@ def build_context(company_id: int, question: str) -> str:
     people = db.get_leaders(company_id)
     history: dict[int, list[dict]] = {}
     for r in db.get_role_history(company_id):
-        history.setdefault(r["leader_id"], []).append(r)
+        history.setdefault(r["person_id"], []).append(r)
     counts = {s: sum(p["status"] == s for p in people) for s in ("current", "unverified", "former")}
 
     lines = [f"COMPANY: {company['name']} ({company['url']}), collected {company['scraped_at']}",
@@ -334,12 +381,12 @@ def build_context(company_id: int, question: str) -> str:
     for p in people:
         alias = f" (also written: {', '.join(p['aliases'])})" if p["aliases"] else ""
         as_of = f", as of {p['as_of']}" if p.get("as_of") else ""
-        lines.append(f"- {p['name']}{alias} | status: {p['status']} | current title: "
+        lines.append(f"- [P{p['person_id']}] {p['name']}{alias} | status: {p['status']} | current title: "
                      f"{p['title']}{as_of} | {p['department']} | {p['seniority']}")
         lines.append(f"    source: {p['source_url']}")
         if p.get("evidence"):
             lines.append(f'    evidence: "{p["evidence"]}"')
-        others = [r for r in history.get(p["id"], []) if not r["is_current_title"]
+        others = [r for r in history.get(p["person_id"], []) if not r["is_current_title"]
                   and r["title"].strip().lower() != (p["title"] or "").strip().lower()]
         for r in others[:4]:
             when = f", {r['as_of']}" if r["as_of"] else ""
