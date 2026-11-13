@@ -6,6 +6,7 @@ import streamlit as st
 import database as db
 import entities
 import rag
+import views
 
 st.set_page_config(page_title="Company Leadership RAG Agent", page_icon="🏢", layout="wide")
 db.init_db()
@@ -16,12 +17,12 @@ if not st.session_state.get("reresolved"):
     outdated = [c for c in db.list_companies()
                 if (c.get("resolved_version") or 0) < entities.RESOLUTION_VERSION]
     if outdated:
-        with st.status("Updating deduplication for previously collected companies...") as s:
+        with st.status("Re-checking sources and duplicates for previously collected companies...") as s:
             try:
                 rag.reresolve_outdated(log=st.write)
-                s.update(label="Deduplication up to date", state="complete")
+                s.update(label="Stored data up to date", state="complete")
             except Exception as e:
-                s.update(label=f"Deduplication update failed: {e}", state="error")
+                s.update(label=f"Update failed: {e}", state="error")
     st.session_state.reresolved = True
 
 # ---------------------------------------------------------------- sidebar
@@ -33,6 +34,7 @@ with st.sidebar:
             try:
                 cid = rag.ingest_company(url, log=st.write)
                 st.session_state.company_id = cid
+                st.session_state.company_select = cid  # widget is created below
                 st.session_state.messages = []
                 status.update(label="Collection complete", state="complete")
             except Exception as e:
@@ -43,19 +45,16 @@ with st.sidebar:
     companies = db.list_companies()
     if companies:
         ids = [c["id"] for c in companies]
-        current = st.session_state.get("company_id", ids[0])
-        chosen = st.selectbox(
-            "Company",
-            ids,
-            index=ids.index(current) if current in ids else 0,
-            format_func=lambda i: next(
-                f"{c['name']} ({c['leader_count']} leaders)" for c in companies if c["id"] == i
-            ),
-        )
+        # A stable key keeps the selection across reruns (no index recomputation).
+        if st.session_state.get("company_select") not in ids:
+            current = st.session_state.get("company_id")
+            st.session_state.company_select = current if current in ids else ids[0]
+        names = {c["id"]: f"{c['name']} ({c['leader_count']} people)" for c in companies}
+        chosen = st.selectbox("Company", ids, key="company_select", format_func=names.get)
         if chosen != st.session_state.get("company_id"):
             st.session_state.company_id = chosen
             st.session_state.messages = []
-        if st.button("Re-run deduplication", help="Re-resolve duplicate people in the "
+        if st.button("Re-check stored data", help="Re-check sources and duplicate people in the "
                      "stored records for this company, without re-collecting."):
             with st.status("Re-running entity resolution...", expanded=True) as s:
                 try:
@@ -75,35 +74,31 @@ if not company_id:
     st.stop()
 
 leaders = db.get_leaders(company_id)
-counts = {s: sum(p["status"] == s for p in leaders) for s in ("current", "unverified", "former")}
-label = (f"Leadership table ({len(leaders)} unique people: {counts['current']} current, "
-         f"{counts['unverified']} unverified, {counts['former']} former)")
-with st.expander(label, expanded=not leaders or len(leaders) < 15):
+company = db.get_company(company_id)
+with st.expander(f"Leadership ({len(leaders)} people)", expanded=not leaders or len(leaders) < 15):
+    st.caption("Collected from public sources (company website, filings, news, public "
+               "profiles). The list may not include every leader.")
+    if company.get("removed_unverified"):
+        st.info(f"{company['removed_unverified']} previously listed people were removed "
+                "because their only evidence came from unverified sources. Collect the "
+                "company again to look for official sources.")
     if leaders:
-        df = pd.DataFrame(leaders)
-        df["source_urls"] = df["source_urls"].fillna("").str.split("\n")
         st.dataframe(
-            df,
+            pd.DataFrame(views.people_rows(leaders), columns=views.PEOPLE_COLUMNS),
             column_config={
-                "person_id": st.column_config.NumberColumn("ID", format="P%d"),
-                "aliases": st.column_config.ListColumn("also written as"),
-                "title": st.column_config.TextColumn("current title"),
-                "source_url": st.column_config.LinkColumn("primary source"),
-                "source_urls": st.column_config.ListColumn("all sources"),
-                "evidence": st.column_config.TextColumn("evidence (verbatim)"),
+                "Source": st.column_config.LinkColumn("Source"),
+                "More sources": st.column_config.ListColumn("More sources"),
             },
             hide_index=True,
             width="stretch",
         )
         roles = db.get_role_history(company_id)
         if roles:
-            with st.popover("Role history (all reported titles by source)"):
-                rdf = pd.DataFrame(roles)
-                rdf["source_tier"] = rdf["source_tier"].map(entities.TIER_LABEL)
-                rdf["is_current_title"] = rdf["is_current_title"].astype(bool)
-                st.dataframe(rdf, hide_index=True, width="stretch",
-                             column_config={"person_id": st.column_config.NumberColumn("ID", format="P%d"),
-                                            "source_url": st.column_config.LinkColumn("source")})
+            with st.popover("Supporting evidence"):
+                st.dataframe(pd.DataFrame(views.evidence_rows(roles),
+                                          columns=views.EVIDENCE_COLUMNS),
+                             hide_index=True, width="stretch",
+                             column_config={"Source": st.column_config.LinkColumn("Source")})
     else:
         st.warning(
             "No leaders found. The site may render its team page with JavaScript, "

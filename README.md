@@ -1,6 +1,6 @@
 # Company Leadership RAG Agent
 
-Give it a company website URL. It finds the company's executives, VPs, and department heads on public pages: the company's own site, Wikipedia, and pages found through Tavily web search. It stores them in SQLite with the URLs each one came from, and lets you ask questions about them in a Streamlit chat. Answers come from Gemini and use only the stored data.
+Give it a company website URL. It finds the company's executives, VPs, and department heads in public sources: the company's own site, regulatory filings, news, reference pages, and public profiles. It checks each source's credibility before using it and stores every person in SQLite with the evidence and URLs behind them. A Streamlit chat answers questions from that data, from stored source passages, and, only when needed, from one targeted web search. Every fact is cited with a clickable source.
 
 ## Quick start
 
@@ -14,8 +14,9 @@ Create `.env`:
 
 ```
 GEMINI_API_KEY=your-key-here
-TAVILY_API_KEY=your-key-here      # optional; without it, only the site crawler and Wikipedia are used
-# optional; defaults to gemini-3.5-flash, with automatic fallback
+TAVILY_API_KEY=your-key-here      # optional; without it, only the site crawler and Wikipedia are used,
+                                  # and the chat can't search the web
+# optional; defaults to gemini-3.5-flash, with automatic fallback and retry
 GEMINI_MODEL=gemini-3.5-flash
 ```
 
@@ -23,96 +24,107 @@ Run:
 
 ```bash
 streamlit run app.py
+python -m pytest tests -q          # 72 offline tests; no API keys needed
 ```
 
-Enter a URL such as `meetcampfire.com` in the sidebar, click **Collect**, then ask questions like *"Who runs engineering?"* or *"List all VPs with their sources."*
+Enter a URL such as `meetcampfire.com` in the sidebar and click **Collect**. Then ask questions such as *"Who is the CEO?"*, *"How many VPs are listed?"*, or *"Where is their CEO based?"*
 
 ## Architecture
 
 ```
-            ┌─ scraper.py: crawl company site ─┐
-URL ──►     ├─ scraper.py: Wikipedia infobox  ─┼─► rag.ingest_company ──► database.py ──► rag.answer ──► app.py
-            └─ search.py:  Tavily web search  ─┘   Gemini extraction      (SQLite)        retrieve +     Streamlit
-                                                    + verification                         generate       chat UI
-                                                    + entity resolution
-                                                      (entities.py)
+            ┌─ scraper.py: crawl company site ─┐      source_policy.py       rag.py             entities.py         database.py
+URL ──►     ├─ scraper.py: Wikipedia          ─┼──►  rules, then Gemini  ──► Gemini        ──► entity          ──► SQLite
+            └─ search.py:  Tavily search      ─┘     (accept / reject)       extraction        resolution
+
+Question ──► rag.answer: SQLite people + exact counts ─► stored passages about the person ─► (only if needed) one
+             targeted Tavily search, same source policy, cached ─► Gemini answer ─► links checked ─► app.py
 ```
 
 | File | Role |
 |---|---|
-| `scraper.py` | Normalizes the URL, reads `robots.txt`, and scores links on the homepage by leadership keywords. It also tries common paths like `/about/leadership`, follows one more level of links, and skips blog, news, and careers sections. It pulls the company's Wikipedia infobox, but only when the article links to the company's domain. |
-| `search.py` | **Tavily discovery layer.** Runs 6 query templates built only from the company name and domain: leadership team; CEO/founder; C-suite; VP; head of / director; plus one search limited to the company's own site. It asks Tavily for full page text, removes duplicate URLs, and drops results that don't mention the company. This finds leaders on sites with no crawlable team page, through news coverage, press releases, the company blog, LinkedIn, and similar pages. |
-| `rag.py` | **Ingest:** sends each candidate page to Gemini (in parallel) with a Pydantic response schema, then checks the results (see below) and passes them to `entities.py`. It also provides the Gemini resolver used in step 2 of entity resolution. **Answer:** builds the context from the people table (explicit unique-people counts, aliases, current title, role history) and the page chunks that best match the question by keyword overlap. Gemini must answer from that context only and cite URLs. |
-| `entities.py` | Entity resolution: turns per-source records into unique people (see below). Makes no network calls; the LLM resolver is passed in. |
-| `database.py` | Holds four tables. `companies`; `leaders`, one row per **unique person** (canonical name, `aliases`, current title, `status`, `as_of`, primary `source_url`, all `source_urls`, `evidence`); `role_history`, every title reported for that person by each source (status, date, source trust level, evidence); and `sources`, raw page text for retrieval. Older databases get the new columns added automatically. Collecting a company again replaces its old data. |
-| `app.py` | Streamlit app. The sidebar collects a new company or picks a stored one. The main area shows the leadership table with sources and evidence, and the chat. |
+| `scraper.py` | Crawls the company site (`robots.txt`, keyword-scored links, common leadership paths). Redirects to other sites are dropped. Also fetches Wikipedia when the article links to the company's domain. |
+| `search.py` | Tavily. At collection time it runs 6 query templates built from the company name and domain, phrased to surface primary sources (leadership pages, appointment announcements, filings). At answer time it runs one targeted search (`web_search`). Tavily is only used to find pages; its results are judged like any other source. |
+| `source_policy.py` | Decides whether a page may be used as evidence (see below), and keeps only the relevant passages of accepted pages. |
+| `rag.py` | Collection pipeline, Gemini extraction, source classifier, entity resolver, clean-up of stored data, and hybrid answering. |
+| `entities.py` | Entity resolution and title freshness (see below). Makes no network calls; the LLM functions are passed in. |
+| `views.py` | The user-facing table rows. Internal fields stay hidden. |
+| `database.py` | SQLite schema, safe migrations, and queries. |
+| `app.py` | Streamlit UI: collect or pick a company, leadership table, supporting evidence, and the chat. |
+
+## Choosing sources (`source_policy.py`)
+
+There is no domain blocklist. Every page, including the final URL after a redirect, is evaluated **before extraction and storage**.
+
+1. **Rule-based checks (no API calls):**
+   - pages with no readable content, or behind a login wall, are rejected;
+   - the company's own domain (any subdomain) is accepted as *official*;
+   - `.gov` domains (e.g. SEC filings) are accepted as *regulatory*;
+   - pages that look like contact or people-data listings (email formats, phone numbers, "reveal contact", employee directories) are rejected, judged by URL and content patterns.
+2. **Gemini assessment, only for unclear pages, in batches.** Each page is labeled *news*, *reference*, *professional_profile* (e.g. a public LinkedIn page readable without login), *people_data_aggregator*, or *other*, together with whether it is credible. Only credible news, reference, and profile pages are accepted. A people-data aggregator is never evidence, even if marked credible: such claims count only when an authoritative source shows the same thing, and that source then stands on its own.
+3. **If the assessment fails, unclear pages are rejected.** Unverified sources are never used.
 
 ## Avoiding hallucination
 
-A record is stored only if it passes every check below. All of them are generic, and no company-specific data is hardcoded.
+A leadership record is stored only if **all** of these hold:
+- it comes from an accepted source;
+- the page is about the right company (pages about another company with the same name are rejected);
+- the person is the company's own employee or board member, not a customer quoted in a testimonial, an investor, or a partner;
+- the name and a verbatim evidence quote appear in the page text;
+- the title names a real leadership role;
+- the record has a full name.
 
-1. **Same company.** Gemini first names the organization the page describes and decides whether it is the company behind the given website. Pages about a different company with the same name (e.g. "Campfire Interactive" vs. campfire.ai) are thrown out.
-2. **Name on the page.** The person's name must appear in the fetched page text.
-3. **Verbatim evidence.** Gemini must quote the passage that shows the role, and the quote must actually be in the page text (case and punctuation are ignored).
-4. **A real title.** The title must name a leadership role (CEO, VP, Head of, Director, Founder, Board…). Vague wording like "Jane in engineering" is rejected.
-5. **Full name.** First-name-only or initials-only records are dropped.
-6. **URLs come from code.** Source URLs are attached by the code, never written by the model.
+Source URLs are attached by the code, never written by the model. The app never claims the list is complete. Counts are worded "listed in the collected sources".
 
-At answer time, Gemini says plainly when the data has no answer. When sources disagree (e.g. two people listed as CTO), it reports both with their sources instead of picking one.
+## Current vs. outdated roles
+
+The database stores no status. Freshness is computed from evidence dates when the data is read.
+- **Outdated roles are not stored.** If a credible source says a person no longer holds a role ("former", "stepped down") and that source is at least as new as the claim, the role is dropped. People with only former roles are excluded.
+- **The current title** comes from the most authoritative source (official/filing first), then the newest.
+- **"(may be outdated)"** is added to a title unless it is backed by a live company page (counted as of the day it was fetched) or a source dated within the last 2 years (`STALE_AFTER_DAYS`). Old press releases and undated third-party profiles are therefore flagged.
 
 ## Entity resolution (`entities.py`)
 
-The same person often appears under different names across sources ("Dan" vs. "Daniel" Gallagher, "Baiju Bhat" vs. "Bhatt", "Vlad" vs. "Vladimir" Tenev). Resolution has two steps.
+1. **Exact matching after cleanup.** Accents, punctuation, honorifics, credentials, and middle initials are removed, and records with the same cleaned name merge.
+2. **Gemini check for unclear pairs only.** Surnames must be similar **and** either the first names are related (nickname, or a prefix such as Dan/Daniel, Vlad/Vladimir) or the titles share a specific role word (Jen-Hsun/Jensen Huang, both "founder … CEO"). The pair merges only on a high-confidence "same person" based on the evidence. A shared surname or title alone never merges two people.
+3. **Display name and IDs.** The spelling used on the company's own site becomes the display name, and other spellings become aliases. `leaders.id` is the internal canonical person ID, used by the database, counts, and chat citations. It is never displayed.
 
-1. **Rule-based (exact) matching.** Names are cleaned up: accents, punctuation, honorifics (Dr.), credentials (", CFA", PhD), and middle initials are removed. Nicknames in parentheses are kept as aliases. Records with the same cleaned first and last name merge with no LLM call.
-2. **Gemini check, only for unclear pairs.** A pair counts as unclear when the surnames match or are 1–2 letters apart (Bhat/Bhatt) **and** either:
-   - the first names are related: same, a common nickname, or a prefix of 3+ letters (Dan/Daniel, Vlad/Vladimir); **or**
-   - the roles overlap on a specific word. Generic title words (director, president, chief, officer, vice, senior, board…) are ignored, and C-suite phrases are shortened ("Chief Executive Officer" → `ceo`). This catches alternative name forms such as a legal or transliterated name vs. the commonly used one (Jen-Hsun/Jensen Huang, both "founder … CEO"; Ajay/Jay Puri, both "Worldwide Field Operations").
+**Re-checking stored data.** When this logic changes (`RESOLUTION_VERSION`), the app re-checks stored companies once on load. The sidebar button **Re-check stored data** does the same on demand.
+- Stored sources are evaluated, and evidence and sources that fail are removed.
+- People left with no acceptable evidence are removed. Their number is shown, with a suggestion to collect the company again.
+- Entity resolution runs again, and merged people keep their lowest ID.
+- Pages are trimmed to relevant passages.
+- If the source check fails, nothing changes and it is retried later.
 
-   A shared surname alone, or a shared title alone, never makes a pair a candidate. Gemini gets both groups' titles, dates, evidence quotes, and sources, and is told that a similar name alone is not enough. The records merge only on a **high-confidence** "same person". On any other answer, or if the call fails, they stay separate. Names that are not similar (Daniel Kelati vs. Daniel Gallagher) are never sent to the check.
+## Hybrid answering (`rag.answer`)
 
-**Combining a merged person.**
-- The canonical name is the spelling the **company's own site** uses, then filings (which often use legal names), then news, then aggregators. Within a level, the most frequent spelling wins. Other spellings become `aliases`. All source URLs and all reported titles are kept (`role_history`).
-- **Source trust levels** are set by domain type only: (1) the company's own domain, including subdomains like `investors.`, plus sec.gov; (2) news and reference sites; (3) data brokers and social sites (LinkedIn, RocketReach, Comparably…).
-- **Current title** = the most trusted non-former record, then the newest. A live (non-article) page on the company's own site counts as evidence as of the day it was fetched. If a source says a title is former and is at least as new as an older claim of the same title, that older "current" claim is demoted.
-- **Status:**
-  - `current`: supported by the live company site or a source from the last 2 years.
-  - `unverified`: only old or undated third-party evidence, such as a 2019 press release or an undated LinkedIn snippet.
-  - `former`: every source says the person no longer holds the role.
+1. **SQLite.** One line per unique person, plus counts by seniority computed in Python, so "How many VPs?" is deterministic.
+2. **Who is the question about?** This is resolved in Python: names and aliases first (Jen-Hsun Huang finds Jensen Huang), otherwise role words matched against titles ("CEO", "marketing").
+3. **Stored evidence.** Passages around that person's names in the accepted sources.
+4. **One Gemini call** returns `{answer, sufficient, missing_info}`. Most questions end here, with no search.
+5. **Web fallback, only if the answer is insufficient:**
+   - one Tavily search, `"<canonical name>" <company> <missing detail>`;
+   - results must mention the person and pass the same source policy;
+   - accepted passages are cached in `sources` (`origin=web`), and the query in `search_cache` (7 days);
+   - a second Gemini call answers from the new evidence.
 
-**Canonical person IDs.** `leaders.id` is the person ID. `role_history` uses the same ID, the table shows it (`P132`), and the chat context tags each person `[P132]`, so the database, the table, and the chatbot always refer to the same person.
+   A repeated question reuses the cached passages. If nothing reliable turns up, the answer says so.
+6. **Safety.**
+   - Web text is passed in delimited blocks marked as untrusted data.
+   - Location answers give only a person's publicly reported professional base, distinct from company headquarters and never a home address.
+   - After the answer is generated, any link not present in the evidence is removed, along with internal IDs.
+   - If search is down, the answer uses the collected data and says the details couldn't be checked.
 
-**Re-resolving stored data.** `companies.resolved_version` records which version of the resolution logic ran (`entities.RESOLUTION_VERSION`). When the logic changes, the app re-resolves outdated companies on load, using **stored records only**, with no re-collection. The sidebar's **Re-run deduplication** button does the same on demand, or you can call `rag.reresolve_company(id)` from code.
-- Records are rebuilt from `role_history`. Rows stored before role histories existed are rebuilt from the leader row and its extra source URLs.
-- Statuses are evaluated as of the original collection date.
-- Merged people keep their **lowest existing ID**, so IDs stay stable.
-- A company is marked done only if no Gemini check failed, so failed checks are retried.
+## Database
 
-The chatbot is given explicit counts ("UNIQUE PEOPLE: 47 (33 current, 14 unverified, 0 former)") with one bullet per person. It is told to count people, never aliases, sources, or titles.
+`companies` (incl. `resolved_version`, `removed_unverified`), `leaders` (one row per person), `role_history` (supporting evidence per source: title, `as_of`, source type, quote), `sources` (accepted sources as passages, with `source_type`, `published`, `origin`), and `search_cache`.
 
-## Tests
-
-```bash
-pip install pytest
-python -m pytest tests -q
-```
-
-`tests/test_entities.py` and `tests/test_name_variants.py` run offline with a fake resolver. They cover:
-- Jen-Hsun/Jensen Huang, including a no-hyphen "JenHsun" form found only through role overlap, with "Jensen Huang" as the canonical name. Also Dan/Daniel Gallagher, Vlad/Vladimir Tenev, and Baiju Bhat/Bhatt.
-- People who share a surname (with unrelated roles, or with only a generic title like "Director") and people who share a title are never sent to the check.
-- Re-resolution of legacy stored rows: lowest ID kept, re-runs give the same result, and a failed check is retried later.
-- The same person IDs in the database, role history, and chat context.
-- Dan/Daniel Gallagher and Baiju Bhat/Bhatt: flagged for review, merged only when the check confirms, aliases, sources, and role history kept.
-- Similar or same-title names that are different people are never merged.
-- A resolver failure leaves records separate.
-- Source trust levels and current-vs-historical status.
-- The chat context counts unique people.
+Migrations run automatically, are safe to rerun, and copy the database to `backups/` before any destructive step. The `status` columns were removed this way, along with the former-role rows they marked.
 
 ## Limitations / next steps
 
-- Dates come from the pages (or Tavily's `published_date`) and may be missing or wrong. A missing date makes a third-party record `unverified` rather than `current`.
-- The 2-year cutoff (`STALE_AFTER_DAYS`) and the domain lists that set trust levels are judgment calls.
-- When two people claim the same title (e.g. a stale CFO and the current one), status shows which claim is better supported, but there is no explicit rule across people.
-- Tavily results change between runs, so collecting the same company twice may give a slightly different set of people.
-- Sites that render their team page with JavaScript, or that block bots, still return little text from the crawler. Tavily often makes up for it.
-- The nickname table is English-centric. A missed pair stays a duplicate rather than being merged wrongly.
+- **Collections vary between runs.** Tavily results and Gemini judgments change, so collecting twice can give slightly different people. Gemini overloads (503) are retried, but extraction can still fail for a page.
+- **Being dropped from a roster isn't detected.** If a newer filing simply omits a former director, there is no explicit "former" statement, so the old record stays and is flagged "(may be outdated)".
+- **Dates are best-effort.** They come from the page or Tavily, and a missing date leads to "may be outdated".
+- **The source classifier is an LLM judgment.** A wrong rejection loses evidence; it never invents a record.
+- **The crawler can't render JavaScript.** Sites that build their team page with JavaScript, or that block bots, yield little crawler text; Tavily often makes up for it.
+- **The nickname table is English-centric.** A missed pair stays a duplicate rather than being merged wrongly.

@@ -15,10 +15,11 @@ COMPANY = "robinhood.com"
 FETCHED = date(2026, 11, 12)
 
 
-def rec(name, title, url, status="current", as_of="", evidence=None, seniority="executive"):
+def rec(name, title, url, status="current", as_of="", evidence=None, seniority="executive",
+        **extra):
     return {"name": name, "title": title, "source_url": url, "status": status,
             "as_of": as_of, "evidence": evidence or f"{name}, {title}",
-            "seniority": seniority, "department": ""}
+            "seniority": seniority, "department": "", **extra}
 
 
 class FakeResolver:
@@ -106,23 +107,29 @@ def test_bhat_bhatt_spelling_variant_is_flagged_and_merged():
     # Canonical spelling comes from the authoritative (company) sources.
     assert p["name"] == "Baiju Bhatt"
     assert p["aliases"] == ["Baiju Bhat"]
-    assert len(p["source_urls"]) == 4
+    # The SEC record only reports a *former* role, and the 2021 press release only
+    # supports the Co-CEO claim that role ended - neither is kept as evidence.
+    assert set(p["source_urls"]) == {
+        "https://investors.robinhood.com/governance/leadership",
+        "https://fintechleaders.substack.com/p/robinhoods-coo-gretchen-howard"}
 
 
 def test_bhat_bhatt_stay_separate_when_evidence_check_says_no():
     assert len(resolve(BHATT, FakeResolver(same=False))) == 2
 
 
-def test_bhatt_current_title_vs_role_history():
+def test_bhatt_outdated_role_excluded_and_current_title_kept():
     (p,) = resolve(BHATT, FakeResolver(same=True))
-    assert p["status"] == "current"
-    # Undated company leadership page (fetched today) beats the dated 2021 press release.
+    # Undated live company leadership page (fetched today) is the current title.
     assert p["title"] == "Co-Founder and Chief Creative Officer"
-    roles = {r["title"]: r for r in p["roles"]}
-    assert roles["Co-CEO"]["status"] == "former"
-    assert roles["Co-CEO"]["as_of"] == "2024-04-25"
-    # The 2021 "Co-CEO" claim is kept as history, not presented as current.
-    assert not roles["Co-Founder and Co-CEO"]["is_current_title"]
+    assert not p["may_be_outdated"]
+    titles = {r["title"] for r in p["roles"]}
+    # The former Co-CEO role is not stored, and the 2021 "Co-Founder and Co-CEO" claim
+    # is dropped because a newer source says the Co-CEO role ended.
+    assert "Co-CEO" not in titles
+    assert "Co-Founder and Co-CEO" not in titles
+    assert titles == {"Co-Founder", "Co-Founder and Chief Creative Officer"}
+    assert "status" not in p and all("status" not in r for r in p["roles"])
 
 
 # ---------------------------------------------------------------- no false merges
@@ -183,29 +190,44 @@ def test_newer_record_wins_within_same_tier():
     assert p["title"] == "SVP Product"
 
 
-def test_all_former_records_mark_person_former():
-    (p,) = resolve([rec("Jane Doe", "CFO", "https://news.example.com/a",
-                        status="former", as_of="2023")])
-    assert p["status"] == "former"
+def test_person_with_only_former_roles_is_excluded():
+    stats = {}
+    people = resolve_people([rec("Jane Doe", "CFO", "https://news.example.com/a",
+                                 status="former", as_of="2023")],
+                            COMPANY, "Robinhood", fetched_on=FETCHED, stats=stats)
+    assert people == [] and stats["excluded_former"] == 1
 
 
-@pytest.mark.parametrize("url,as_of,expected", [
+def test_newer_verified_role_replaces_older_one():
+    (p,) = resolve([
+        rec("Jane Doe", "VP Finance", "https://news.example.com/a", as_of="2021-01-01"),
+        rec("Jane Doe", "VP Finance", "https://news.example.org/b", status="former",
+            as_of="2025-03-01"),
+        rec("Jane Doe", "Chief Financial Officer", "https://news.example.org/b", as_of="2025-03-01"),
+    ])
+    assert p["title"] == "Chief Financial Officer"
+    assert {r["title"] for r in p["roles"]} == {"Chief Financial Officer"}
+
+
+@pytest.mark.parametrize("url,as_of,outdated", [
     # old press release on the company's own site: can't confirm the role today
-    ("https://robinhood.com/newsroom/new-cfo", "2019-11-21", "unverified"),
+    ("https://robinhood.com/newsroom/new-cfo", "2019-11-21", True),
     # undated third-party profile
-    ("https://www.linkedin.com/company/robinhood", "", "unverified"),
+    ("https://www.linkedin.com/company/robinhood", "", True),
     # recent dated news article
-    ("https://www.cnbc.com/2026/robinhood", "2026-05-01", "current"),
+    ("https://www.cnbc.com/2026/robinhood", "2026-05-01", False),
     # live, undated company leadership page
-    ("https://investors.robinhood.com/governance/leadership", "", "current"),
+    ("https://investors.robinhood.com/governance/leadership", "", False),
     # live company page that mentions an old *start* date ("on our board since 2021")
-    ("https://investors.robinhood.com/governance/board-of-directors", "June 2021", "current"),
+    ("https://investors.robinhood.com/governance/board-of-directors", "June 2021", False),
     # an SEC filing is a dated document, not a live page
-    ("https://www.sec.gov/Archives/edgar/data/1/old-proxy.htm", "2021-04-01", "unverified"),
+    ("https://www.sec.gov/Archives/edgar/data/1/old-proxy.htm", "2021-04-01", True),
 ])
-def test_current_requires_recent_or_live_company_evidence(url, as_of, expected):
+def test_may_be_outdated_requires_recent_or_live_company_evidence(url, as_of, outdated):
     (p,) = resolve([rec("Jane Doe", "Chief Financial Officer", url, as_of=as_of)])
-    assert p["status"] == expected
+    assert p["may_be_outdated"] is outdated
+    # The same flag is recomputed from the stored effective date.
+    assert entities.may_be_outdated(p["as_of"], FETCHED) is outdated
 
 
 @pytest.mark.parametrize("url,tier", [
@@ -213,10 +235,21 @@ def test_current_requires_recent_or_live_company_evidence(url, as_of, expected):
     ("https://www.robinhood.com/us/en/newsroom/x", 1),
     ("https://www.sec.gov/Archives/x", 1),
     ("https://www.cnbc.com/2025/robinhood", 2),
-    ("https://www.linkedin.com/company/robinhood", 3),
+    ("https://www.linkedin.com/company/robinhood", 2),
 ])
 def test_source_tiers(url, tier):
     assert entities.source_tier(url, COMPANY) == tier
+
+
+def test_tier_follows_evaluated_source_type():
+    assert entities.source_tier("https://ir.example-host.com/x", COMPANY, "official") == 1
+    assert entities.source_tier("https://www.reuters.com/x", COMPANY, "news") == 2
+
+
+def test_aggregator_records_never_become_evidence():
+    people = resolve([rec("Jane Doe", "CFO", "https://people-data.example.com/x",
+                          source_type="people_data_aggregator")])
+    assert people == []
 
 
 def test_name_normalization():
@@ -238,9 +271,9 @@ def test_chat_context_counts_unique_people_not_records(tmp_path, monkeypatch):
     people = resolve(GALLAGHER + BHATT, FakeResolver(same=True))
     assert db.save_people(cid, people) == 2
 
-    ctx = rag.build_context(cid, "How many executives are there?")
-    # Bhatt: confirmed by the live company page. Gallagher: only undated aggregator sources.
-    assert "UNIQUE PEOPLE: 2 (1 current, 1 unverified, 0 former)" in ctx
-    assert ctx.count("\n- ") == 2  # one bullet per person, not per source record
+    ctx, _urls = rag.build_context(cid, "How many executives are there?")
+    assert "Unique people listed: 2" in ctx
+    assert "Executives: 2" in ctx
+    assert ctx.count("\n- [P") == 2  # one bullet per person, not per source record
     assert "also written: Baiju Bhat" in ctx
-    assert "other reported title: Co-CEO (former, 2024-04-25" in ctx
+    assert "Co-CEO" not in ctx.split("QUESTION IS ABOUT")[0]  # former role not listed

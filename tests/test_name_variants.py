@@ -25,6 +25,11 @@ class FakeResolver:
         return self.same, "fake"
 
 
+def accept_all(items):
+    """Fake source classifier: every ambiguous page is a credible news source."""
+    return [("news", True, "fake") for _ in items]
+
+
 def never_called(a, b):
     raise AssertionError(f"resolver should not be called for {a[0]['name']} / {b[0]['name']}")
 
@@ -173,8 +178,9 @@ def test_reresolution_merges_existing_records_and_keeps_lowest_id(tmp_db):
     old_ids = _legacy_rows(db, cid)
     assert db.get_company(cid)["resolved_version"] == 0
 
-    stats = rag.reresolve_company(cid, resolver=FakeResolver(same=True), log=lambda m: None)
-    assert stats == {"checked": 1, "merged": 1, "failed": 0}
+    stats = rag.reresolve_company(cid, resolver=FakeResolver(same=True), classifier=accept_all,
+                                  log=lambda m: None)
+    assert (stats["checked"], stats["merged"], stats["failed"]) == (1, 1, 0)
 
     people = {p["name"]: p for p in db.get_leaders(cid)}
     assert set(people) == {"Jensen Huang", "Colette Kress"}
@@ -186,7 +192,7 @@ def test_reresolution_merges_existing_records_and_keeps_lowest_id(tmp_db):
     assert db.get_company(cid)["resolved_version"] == entities.RESOLUTION_VERSION
 
     # Idempotent: a second run keeps the same people, IDs, and aliases.
-    rag.reresolve_company(cid, resolver=never_called, log=lambda m: None)
+    rag.reresolve_company(cid, resolver=never_called, classifier=accept_all, log=lambda m: None)
     again = {p["name"]: p for p in db.get_leaders(cid)}
     assert {n: p["person_id"] for n, p in again.items()} == \
         {n: p["person_id"] for n, p in people.items()}
@@ -201,7 +207,7 @@ def test_failed_check_leaves_company_marked_for_retry(tmp_db):
 
     def broken(a, b):
         raise RuntimeError("API down")
-    stats = rag.reresolve_company(cid, resolver=broken, log=lambda m: None)
+    stats = rag.reresolve_company(cid, resolver=broken, classifier=accept_all, log=lambda m: None)
     assert stats["failed"] == 1
     assert len(db.get_leaders(cid)) == 3                     # nothing merged
     assert db.get_company(cid)["resolved_version"] == 0      # retried next time
@@ -212,12 +218,16 @@ def test_db_table_and_chat_share_canonical_person_ids(tmp_db):
     db = tmp_db
     cid = db.upsert_company("NVIDIA", "https://www.nvidia.com/en-us/")
     _legacy_rows(db, cid)
-    rag.reresolve_company(cid, resolver=FakeResolver(same=True), log=lambda m: None)
+    rag.reresolve_company(cid, resolver=FakeResolver(same=True), classifier=accept_all,
+                          log=lambda m: None)
 
     leader_ids = {p["person_id"] for p in db.get_leaders(cid)}
     history_ids = {r["person_id"] for r in db.get_role_history(cid)}
     assert history_ids == leader_ids
-    ctx = rag.build_context(cid, "Who is the CEO?")
-    assert "UNIQUE PEOPLE: 2" in ctx
+    ctx, _urls = rag.build_context(cid, "Who is the CFO?")
+    assert "Unique people listed: 2" in ctx
+    people_section = ctx.split("QUESTION IS ABOUT")[0]
     for pid in leader_ids:
-        assert ctx.count(f"[P{pid}]") == 1
+        assert people_section.count(f"[P{pid}]") == 1  # one line per canonical person
+    # IDs are internal: they never reach the user.
+    assert "[P" not in rag.clean_answer(f"Colette Kress [P{min(leader_ids)}] is CFO.", set())

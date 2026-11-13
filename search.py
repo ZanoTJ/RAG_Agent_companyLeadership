@@ -1,4 +1,5 @@
-"""Tavily-powered discovery of public pages that mention a company's leaders.
+"""Tavily-powered web search: discovery of pages that mention a company's leaders
+(at collection time) and targeted searches for answer-time fallback.
 
 Complements scraper.py for sites without a crawlable leadership page. Queries are
 built only from the company name and domain - nothing company-specific is hardcoded.
@@ -12,14 +13,16 @@ from scraper import MAX_CHARS_PER_PAGE, Page, bare_domain
 
 load_dotenv()
 
-# (query template, restrict to company domain?)
+# (query template, restrict to company domain?). Phrased to surface primary
+# sources - the company's own pages, press releases about appointments, filings,
+# and news coverage. Every result is still evaluated by source_policy.
 QUERY_TEMPLATES = [
     ('"{name}" {domain} leadership team executives', False),
     ('"{name}" {domain} CEO founder co-founder', False),
-    ('"{name}" {domain} CFO CTO COO chief officer', False),
-    ('"{name}" {domain} vice president VP', False),
-    ('"{name}" {domain} head of director department', False),
-    ("{name} about us team leadership founders", True),
+    ('"{name}" appoints OR names chief officer', False),
+    ('"{name}" {domain} vice president OR "head of"', False),
+    ('"{name}" executive officers directors SEC filing proxy', False),
+    ("{name} leadership team management board", True),
 ]
 RESULTS_PER_QUERY = 5
 
@@ -71,4 +74,23 @@ def discover(company_name: str, company_url: str, seen_urls: set[str] | None = N
                               published=r.get("published_date") or ""))
             new += 1
         log(f"Search: {query} -> {new} new pages")
+    return pages
+
+
+def web_search(query: str, max_results: int = 5) -> list[Page]:
+    """One targeted search (answer-time fallback). Raises on API errors so the
+    caller can tell "search failed" from "nothing found"."""
+    if not tavily_available():
+        raise RuntimeError("TAVILY_API_KEY not set")
+    from tavily import TavilyClient
+
+    resp = TavilyClient(api_key=os.environ["TAVILY_API_KEY"]).search(
+        query, search_depth="basic", max_results=max_results, include_raw_content="text")
+    pages = []
+    for r in resp.get("results", []):
+        url = (r.get("url") or "").rstrip("/")
+        text = (r.get("raw_content") or r.get("content") or "").strip()
+        if url and text:
+            pages.append(Page(url, f"{r.get('title') or ''}\n{text}"[:MAX_CHARS_PER_PAGE],
+                              published=r.get("published_date") or ""))
     return pages

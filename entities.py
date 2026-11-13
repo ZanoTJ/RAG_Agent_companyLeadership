@@ -12,11 +12,12 @@ A shared surname or a shared title alone never makes a candidate. They merge onl
 the resolver confirms they are the same person. With no resolver, or on any
 error, they stay separate: a similar name alone never merges two people.
 
-Each resulting person keeps every alias, source URL, and reported role. The
-current title is chosen by source authority first, then recency. A person is
-"current" only if supported by the company's own (undated, live) pages or a source
-dated within STALE_AFTER_DAYS; otherwise "unverified". "former" if every source
-says so.
+Each resulting person keeps every alias and supporting source. Outdated roles are
+not stored: a role is dropped when a credible source says it has ended (and that
+source is at least as new as the claim); people with only former roles are
+excluded. The current title is chosen by source authority first, then recency, and
+is flagged "may be outdated" unless backed by a live company page or a source dated
+within STALE_AFTER_DAYS. No status is stored; freshness is computed from dates.
 
 This module makes no network calls; the resolver is injected (see rag.py).
 """
@@ -198,18 +199,12 @@ def is_candidate_pair(a: NameParts, b: NameParts, titles_a=(), titles_b=()) -> b
 
 # ---------------------------------------------------------------- sources & dates
 
-AGGREGATOR_DOMAINS = {
-    "linkedin.com", "rocketreach.co", "comparably.com", "crunchbase.com", "zoominfo.com",
-    "leadiq.com", "getlatka.com", "cbinsights.com", "theorg.com", "exa.ai", "apollo.io",
-    "signalhire.com", "contactout.com", "craft.co", "owler.com", "pitchbook.com",
-    "glassdoor.com", "indeed.com", "lusha.com", "clay.com", "rocketreach.com",
-}
-AUTHORITATIVE_DOMAINS = {"sec.gov"}  # regulatory filings
 _ARTICLE_PATH = re.compile(
     r"/(blog|news|newsroom|press|press-releases?|articles?|posts?|stories|insights|"
     r"announcements?|media)(/|$)", re.I)
-TIER_LABEL = {1: "company/official", 2: "news/reference", 3: "aggregator/social"}
-RESOLUTION_VERSION = 2  # bump when resolution logic changes; stored data is re-resolved
+TIER_LABEL = {1: "Official / filing", 2: "News / reference / profile"}
+RESOLUTION_VERSION = 3  # bump when resolution logic changes; stored data is re-resolved
+OFFICIAL_TYPES = {"official", "regulatory"}
 
 
 def registrable_domain(url_or_host: str) -> str:
@@ -222,22 +217,25 @@ def registrable_domain(url_or_host: str) -> str:
     return ".".join(labels[-2:])
 
 
-def name_authority(url: str, company_domain: str) -> int:
+def _is_gov(url: str) -> bool:
+    return urlparse(url).netloc.lower().split(":")[0].endswith(".gov")
+
+
+def source_tier(url: str, company_domain: str, source_type: str = "") -> int:
+    """1 = company's own domain (any subdomain), government filing, or a source the
+    evaluator classified official/regulatory; 2 = other accepted public sources."""
+    if (registrable_domain(url) == registrable_domain(company_domain) or _is_gov(url)
+            or source_type in OFFICIAL_TYPES):
+        return 1
+    return 2
+
+
+def name_authority(url: str, company_domain: str, source_type: str = "") -> int:
     """For choosing a display name: the company's own site (how it refers to its
-    people) > filings (often legal names) > news > aggregators."""
+    people) > filings (often legal names) > other public sources."""
     if registrable_domain(url) == registrable_domain(company_domain):
         return 0
-    return source_tier(url, company_domain)  # sec.gov -> 1, news -> 2, aggregator -> 3
-
-
-def source_tier(url: str, company_domain: str) -> int:
-    """1 = company's own domain (any subdomain) or regulator, 2 = news/other, 3 = aggregator."""
-    d = registrable_domain(url)
-    if d == registrable_domain(company_domain) or d in AUTHORITATIVE_DOMAINS:
-        return 1
-    if d in AGGREGATOR_DOMAINS:
-        return 3
-    return 2
+    return source_tier(url, company_domain, source_type)
 
 
 _MONTHS = {m: i for i, m in enumerate(
@@ -272,7 +270,7 @@ SENIORITY_RANK = {"executive": 0, "board": 1, "vp": 2, "department_head": 3, "ot
 STALE_AFTER_DAYS = 730  # evidence older than this can't confirm a role is still current
 
 # resolver(cluster_a, cluster_b) -> (same_person, reason). Each cluster is a list
-# of records (name, title, status, as_of, evidence, source_url).
+# of records (name, title, as_of, evidence, source_url).
 Resolver = Callable[[list[dict], list[dict]], tuple[bool, str]]
 
 
@@ -281,16 +279,40 @@ def _norm_title(t: str) -> str:
 
 
 def _record_date(r: dict, fetched: tuple[int, int, int]) -> tuple[int, int, int]:
-    """Effective date used to rank records.
+    """Effective date of a record's evidence.
 
     A live (non-article) page on the company's own site describes the present, so a
-    role it shows as current is evidence as of the fetch date - even if it mentions a
-    start date ("on our board since 2021"). Otherwise use the date the source states."""
-    live_company_page = (r["tier"] == 1 and registrable_domain(r["source_url"]) != "sec.gov"
+    role it lists is evidence as of the fetch date - even if it mentions a start date
+    ("on our board since 2021"). Otherwise use the date the source states, if any."""
+    live_company_page = (registrable_domain(r["source_url"]) == r["_company"]
                          and not _ARTICLE_PATH.search(urlparse(r["source_url"]).path))
-    if live_company_page and r["status"] != "former":
+    if live_company_page and r.get("status") != "former":
         return fetched
     return parse_date(r.get("as_of"))
+
+
+def is_recent(d: tuple[int, int, int], fetched: tuple[int, int, int]) -> bool:
+    if d == (0, 0, 0):
+        return False
+    then = date(d[0], d[1] or 1, d[2] or 1)
+    return (date(*fetched) - then).days <= STALE_AFTER_DAYS
+
+
+def may_be_outdated(as_of: str, collected_on: date | None) -> bool:
+    """A person's current title is shown "(may be outdated)" unless its supporting
+    evidence is a live company page or a source dated within STALE_AFTER_DAYS of
+    collection. `as_of` is the stored effective evidence date."""
+    fetched = (collected_on or date.today()).timetuple()[:3]
+    return not is_recent(parse_date(as_of), fetched)
+
+
+def _supersedes(former: dict, claim: dict) -> bool:
+    """A 'former' record (e.g. "previously served as Co-CEO") cancels a current claim
+    of the same role when it is at least as new as that claim."""
+    fa, ca = role_tokens(former["title"]), role_tokens(claim["title"])
+    same_role = (_norm_title(former["title"]) == _norm_title(claim["title"])
+                 or (fa and fa <= ca))
+    return bool(same_role) and former["date"] != (0, 0, 0) and former["date"] >= claim["date"]
 
 
 def resolve_people(records: list[dict], company_domain: str, company_name: str = "",
@@ -299,12 +321,15 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
                    stats: dict | None = None) -> list[dict]:
     """Group per-source records into unique people (see module docstring).
 
-    Records may carry `person_id` (existing DB id - the merged person keeps the
-    lowest), `aliases`, and `extra_sources` (supporting URLs without a title).
-    `stats`, if given, is filled with checked/merged/failed counts."""
+    Records may carry `status` ("current"/"former"/"unknown", from extraction; used
+    only here, never stored), `source_type` (from source evaluation), `person_id`
+    (existing DB id - the merged person keeps the lowest), `aliases`, and
+    `extra_sources` (supporting URLs without a title). People whose only roles are
+    former are excluded. `stats` gets checked/merged/failed/excluded_former counts."""
     stats = stats if stats is not None else {}
-    stats.update(checked=0, merged=0, failed=0)
+    stats.update(checked=0, merged=0, failed=0, excluded_former=0)
     fetched = (fetched_on or date.today()).timetuple()[:3]
+    company = registrable_domain(company_domain)
     at_company = re.compile(rf"\s+(at|@)\s+{re.escape(company_name)}\.?$", re.I) \
         if company_name else None
 
@@ -315,14 +340,17 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
         parts = parse_name(rec.get("name") or "")
         if not parts or not rec.get("source_url"):
             continue  # unverifiable (first name / initials only) or unsourced
+        if rec.get("source_type") == "people_data_aggregator":
+            continue  # never evidence (defensive; such sources are filtered earlier)
         r = dict(rec)
         r["name"] = display_name(r["name"])
         r["title"] = (r.get("title") or "").strip()
         if at_company:
             r["title"] = at_company.sub("", r["title"])  # "CTO at Acme" -> "CTO"
         r["status"] = r.get("status") or "unknown"
-        r["tier"] = source_tier(r["source_url"], company_domain)
-        r["authority"] = name_authority(r["source_url"], company_domain)
+        r["_company"] = company
+        r["tier"] = source_tier(r["source_url"], company_domain, r.get("source_type", ""))
+        r["authority"] = name_authority(r["source_url"], company_domain, r.get("source_type", ""))
         r["date"] = _record_date(r, fetched)
         clusters.setdefault(parts.key, []).append(r)
         parts_of.setdefault(parts.key, parts)
@@ -362,40 +390,42 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
     merged: dict[str, list[dict]] = {}
     for k, recs in clusters.items():
         merged.setdefault(find(k), []).extend(recs)
-    return [_consolidate(recs, fetched) for recs in merged.values()]
+    people = []
+    for recs in merged.values():
+        person = _consolidate(recs, fetched)
+        if person is None:
+            stats["excluded_former"] += 1
+            log(f"Excluded (only former roles): {recs[0]['name']}")
+        else:
+            people.append(person)
+    return people
 
 
-def _is_recent(d: tuple[int, int, int], fetched: tuple[int, int, int]) -> bool:
-    if d == (0, 0, 0):
-        return False
-    then = date(d[0], d[1] or 1, d[2] or 1)
-    return (date(*fetched) - then).days <= STALE_AFTER_DAYS
-
-
-def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> dict:
-    """Build one person from all their records."""
-    # A newer (or equally dated) 'former' record for the same title overrides older
-    # 'current' claims of that title, e.g. "stepped down as Co-CEO in 2024".
-    for r in recs:
-        if r["status"] != "former":
-            if any(o["status"] == "former" and _norm_title(o["title"]) == _norm_title(r["title"])
-                   and o["date"] != (0, 0, 0) and o["date"] >= r["date"] for o in recs):
-                r["status"] = "former"
+def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> dict | None:
+    """Build one person from all their records, or None if every role is former."""
+    formers = [r for r in recs if r["status"] == "former"]
+    # Outdated roles are dropped, not stored: explicit "former" records, and current
+    # claims of a role that an equally new or newer source says has ended.
+    active = [r for r in recs if r["status"] != "former"
+              and not any(_supersedes(f, r) for f in formers)]
+    if not active:
+        return None
 
     def rank(r: dict):
         return (r["tier"], tuple(-x for x in r["date"]),
                 0 if r["status"] == "current" else 1,
                 SENIORITY_RANK.get(r.get("seniority"), 4), -len(r["title"]))
 
-    active = sorted((r for r in recs if r["status"] != "former"), key=rank)
-    best = active[0] if active else sorted(recs, key=rank)[0]
+    active.sort(key=rank)
+    best = active[0]
 
-    # Canonical spelling: best-supported variant (authority, then frequency).
+    # Canonical spelling: the name the company itself uses, then filings, then other
+    # sources; within a level, the most frequently used spelling. Spellings from
+    # dropped (former) records are still kept as aliases.
     spellings: dict[str, list[dict]] = {}
     for r in recs:
         spellings.setdefault(r["name"], []).append(r)
-    # Prefer the name the company itself uses, then filings, news, aggregators;
-    # within a level, the most frequently used spelling.
+
     def name_rank(n: str):
         best_auth = min(x["authority"] for x in spellings[n])
         return (best_auth, -sum(x["authority"] == best_auth for x in spellings[n]),
@@ -404,35 +434,34 @@ def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> dict:
     all_names = set(spellings).union(*(set(r.get("aliases") or []) for r in recs))
 
     roles, seen = [], set()
-    for r in sorted(recs, key=rank):
-        k = (_norm_title(r["title"]), r["status"], r["source_url"])
+    for r in active:
+        k = (_norm_title(r["title"]), r["source_url"])
         if k in seen:
             continue
         seen.add(k)
         roles.append({
             # only dates actually stated by the source (not the fetch-date fallback)
-            "name": r["name"], "title": r["title"], "status": r["status"],
+            "name": r["name"], "title": r["title"],
             "as_of": format_date(parse_date(r.get("as_of"))),
             "source_url": r["source_url"], "source_tier": r["tier"],
+            "source_type": r.get("source_type") or "",
             "evidence": r.get("evidence") or "", "is_current_title": r is best,
         })
 
-    by_rank = sorted(recs, key=rank)
     return {
         "id": min((r["person_id"] for r in recs if r.get("person_id")), default=None),
         "name": canonical,
         "aliases": sorted(n for n in all_names if n != canonical),
         "title": best["title"],
-        "status": "former" if not active
-        else "current" if _is_recent(best["date"], fetched) else "unverified",
-        "as_of": format_date(best["date"]),
+        "as_of": format_date(best["date"]),  # effective evidence date (internal)
+        "may_be_outdated": not is_recent(best["date"], fetched),
         "department": best.get("department") or next(
-            (r["department"] for r in by_rank if r.get("department")), ""),
+            (r["department"] for r in active if r.get("department")), ""),
         "seniority": best.get("seniority") or "other",
         "source_url": best["source_url"],
         "source_urls": list(dict.fromkeys(
-            [r["source_url"] for r in by_rank] + [u for r in by_rank
-                                                  for u in r.get("extra_sources") or []])),
+            [r["source_url"] for r in active] + [u for r in active
+                                                 for u in r.get("extra_sources") or []])),
         "evidence": best.get("evidence") or "",
         "roles": roles,
     }
