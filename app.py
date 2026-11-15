@@ -11,35 +11,28 @@ import views
 st.set_page_config(page_title="Company Leadership RAG Agent", page_icon="🏢", layout="wide")
 db.init_db()
 
-# Data stored by older versions of the entity-resolution logic is re-resolved once
-# (stored records only - nothing is re-collected).
-if not st.session_state.get("reresolved"):
-    outdated = [c for c in db.list_companies()
-                if (c.get("resolved_version") or 0) < entities.RESOLUTION_VERSION]
-    if outdated:
-        with st.status("Re-checking sources and duplicates for previously collected companies...") as s:
-            try:
-                rag.reresolve_outdated(log=st.write)
-                s.update(label="Stored data up to date", state="complete")
-            except Exception as e:
-                s.update(label=f"Update failed: {e}", state="error")
-    st.session_state.reresolved = True
-
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
     st.header("1. Collect leadership")
     url = st.text_input("Company website", placeholder="https://www.example.com")
     if st.button("Collect", type="primary", disabled=not url):
-        with st.status("Collecting leadership data...", expanded=True) as status:
-            try:
-                cid = rag.ingest_company(url, log=st.write)
-                st.session_state.company_id = cid
-                st.session_state.company_select = cid  # widget is created below
-                st.session_state.messages = []
-                status.update(label="Collection complete", state="complete")
-            except Exception as e:
-                status.update(label="Collection failed", state="error")
-                st.error(str(e))
+        bar = st.progress(0.0, text="Collecting leadership data...")
+        steps = [0]
+
+        def advance(_msg):
+            # The total step count isn't known up front, so ease toward 95%.
+            steps[0] += 1
+            bar.progress(min(0.95, 1 - 0.93 ** steps[0]), text="Collecting leadership data...")
+
+        try:
+            cid = rag.ingest_company(url, log=advance)
+            st.session_state.company_id = cid
+            st.session_state.company_select = cid  # widget is created below
+            st.session_state.messages = []
+            bar.progress(1.0, text="Collection complete")
+        except Exception as e:
+            bar.empty()
+            st.error(f"Collection failed: {e}")
 
     st.header("2. Pick a company")
     companies = db.list_companies()
@@ -54,15 +47,6 @@ with st.sidebar:
         if chosen != st.session_state.get("company_id"):
             st.session_state.company_id = chosen
             st.session_state.messages = []
-        if st.button("Re-check stored data", help="Re-check sources and duplicate people in the "
-                     "stored records for this company, without re-collecting."):
-            with st.status("Re-running entity resolution...", expanded=True) as s:
-                try:
-                    rag.reresolve_company(chosen, log=st.write)
-                    s.update(label="Deduplication complete", state="complete")
-                except Exception as e:
-                    s.update(label="Deduplication failed", state="error")
-                    st.error(str(e))
     else:
         st.caption("No companies collected yet.")
 

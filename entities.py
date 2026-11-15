@@ -18,11 +18,7 @@ board-only members and other titles are excluded. Outdated roles are not stored:
 a role is dropped when a credible source says it has ended or a newer source names
 someone else in the same one-person role (e.g. CTO); people left without a current
 leadership role are excluded, and so are people missing from the company's current
-roster pages whose evidence is old. The current title is chosen by source authority
-first, then recency, and is flagged "may be outdated" unless backed by current
-evidence: a live company page, the person's own profile listing it as current, or a
-source dated within STALE_AFTER_DAYS. Disagreeing sources are flagged, not hidden.
-No status is stored; freshness is computed from dates.
+roster pages whose evidence is old. Freshness is computed from dates.
 
 This module makes no network calls; the resolver is injected (see rag.py).
 """
@@ -410,22 +406,6 @@ def _is_live_company_page(r: dict) -> bool:
     return (registrable_domain(r["source_url"]) == r["_company"]
             and not _ARTICLE_PATH.search(urlparse(r["source_url"]).path))
 
-
-def is_recent(d: tuple[int, int, int], fetched: tuple[int, int, int]) -> bool:
-    if d == (0, 0, 0):
-        return False
-    then = date(d[0], d[1] or 1, d[2] or 1)
-    return (date(*fetched) - then).days <= STALE_AFTER_DAYS
-
-
-def may_be_outdated(as_of: str, collected_on: date | None) -> bool:
-    """A person's current title is shown "(may be outdated)" unless its supporting
-    evidence is a live company page or a source dated within STALE_AFTER_DAYS of
-    collection. `as_of` is the stored effective evidence date."""
-    fetched = (collected_on or date.today()).timetuple()[:3]
-    return not is_recent(parse_date(as_of), fetched)
-
-
 def _supersedes(former: dict, claim: dict) -> bool:
     """A 'former' record (e.g. "previously served as Co-CEO") cancels a current claim
     of the same role when it is at least as new as that claim."""
@@ -536,7 +516,7 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
         person, reason = _consolidate(recs, fetched)
         if person is None:
             exclude(recs, reason)
-        elif has_roster and not person["_on_live_page"] and not is_recent(person["_date"], fetched):
+        elif has_roster and not person["_on_live_page"]:
             exclude(recs, REASON_NOT_ON_ROSTER)
         else:
             built.append((recs, person))
@@ -553,7 +533,7 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
             continue
         idx.sort(key=lambda i: built[i][1]["_single_roles"][role], reverse=True)
         top, second = (built[i][1]["_single_roles"][role] for i in idx[:2])
-        decided = top > second and (second != (0, 0, 0) or is_recent(top, fetched))
+        decided = top > second and (second != (0, 0, 0))
         label = role.upper() if role != "general counsel" else "General Counsel"
         if not decided:
             names = ", ".join(built[i][1]["name"] for i in idx)
@@ -679,7 +659,6 @@ def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> tuple[dict 
         "aliases": sorted(n for n in all_names if n != canonical),
         "title": best["title"],
         "as_of": format_date(date_),  # effective evidence date (internal)
-        "may_be_outdated": not is_recent(date_, fetched),
         "conflict": conflict,
         "department": best.get("department") or next(
             (r["department"] for r in active if r.get("department")), ""),

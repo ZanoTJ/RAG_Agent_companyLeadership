@@ -7,7 +7,7 @@ from collections import Counter
 import source_policy
 
 SENIORITY_DISPLAY = {"executive": "C-level", "vp": "VP", "department_head": "Department head"}
-PEOPLE_COLUMNS = ["Name", "Also known as", "Title", "Department", "Seniority", "Source",
+PEOPLE_COLUMNS = ["Name", "Also known as", "Title", "As Of", "Department", "Seniority", "Source",
                   "More sources"]
 EVIDENCE_COLUMNS = ["Name", "Title", "Source type", "Source", "Evidence"]
 
@@ -20,8 +20,8 @@ def people_rows(leaders: list[dict]) -> list[dict]:
             "Name": p["name"],
             "Also known as": ", ".join(p.get("aliases") or []),
             "Title": (p.get("title") or "")
-            + (" (may be outdated)" if p.get("may_be_outdated") else "")
             + (" (sources disagree)" if p.get("conflict") else ""),
+            "As Of": p.get("as_of") or "",
             "Department": p.get("department") or "",
             "Seniority": SENIORITY_DISPLAY.get(p.get("seniority"), "Other"),
             "Source": p["source_url"],

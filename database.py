@@ -7,8 +7,6 @@ from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-import entities
-
 DB_PATH = "leadership.db"
 
 SCHEMA = """
@@ -325,10 +323,9 @@ def replace_people(company_id: int, people: list[dict], db_path: str | None = No
 
 def get_leaders(company_id: int, db_path: str | None = None) -> list[dict]:
     """One row per unique person, by seniority. `person_id` is internal (citations,
-    counting); `may_be_outdated` is computed from the evidence date, not stored."""
+    counting)."""
     order = """CASE seniority WHEN 'executive' THEN 0 WHEN 'vp' THEN 1
                WHEN 'department_head' THEN 2 ELSE 3 END"""
-    company = get_company(company_id, db_path)
     with get_conn(db_path) as conn:
         rows = conn.execute(
             f"""SELECT id AS person_id, name, aliases, title, department, seniority,
@@ -341,7 +338,6 @@ def get_leaders(company_id: int, db_path: str | None = None) -> list[dict]:
     for r in rows:
         d = dict(r)
         d["aliases"] = json.loads(d["aliases"]) if d["aliases"] else []
-        d["may_be_outdated"] = entities.may_be_outdated(d["as_of"] or "", collected_on(company))
         out.append(d)
     return out
 
