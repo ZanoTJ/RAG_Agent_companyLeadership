@@ -1,5 +1,7 @@
 """Streamlit UI: collect a company's leadership, then chat about it."""
 
+import json
+
 import pandas as pd
 import streamlit as st
 
@@ -80,6 +82,22 @@ with st.expander(f"Leadership ({len(leaders)} people)", expanded=not leaders or 
             "block automated requests, or not publish leadership publicly."
         )
 
+report = json.loads(company.get("collection_report") or "{}")
+if report:
+    with st.expander("Collection report", expanded=False):
+        pages = report.get("pages", [])
+        st.caption(f"{sum(p['accepted'] for p in pages)} sources accepted, "
+                   f"{sum(not p['accepted'] for p in pages)} rejected, "
+                   f"{len(report.get('excluded_people', []))} people excluded.")
+        st.markdown("**Sources**")
+        st.dataframe(pd.DataFrame(pages, columns=["accepted", "type", "reason", "url", "origin"]),
+                     column_config={"url": st.column_config.LinkColumn("url")},
+                     hide_index=True, width="stretch")
+        st.markdown("**Excluded people**")
+        st.dataframe(pd.DataFrame(report.get("excluded_people", []),
+                                  columns=["name", "title", "reason"]),
+                     hide_index=True, width="stretch")
+
 st.session_state.setdefault("messages", [])
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -93,7 +111,7 @@ if question := st.chat_input("Ask about this company's leadership, e.g. 'Who run
             try:
                 reply = rag.answer(company_id, question, st.session_state.messages)
             except Exception as e:
-                reply = f"Error calling Gemini: {e}"
+                reply = f"Error answering question: {e}"
         st.markdown(reply)
     st.session_state.messages += [
         {"role": "user", "content": question},

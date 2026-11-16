@@ -4,7 +4,8 @@ Two layers, applied before extraction and storage:
 
 1. Deterministic rules (no API calls):
    - reject pages with no readable content or behind a login wall;
-   - accept the company's own domain (any subdomain) as "official";
+   - accept the company's own domain (any subdomain; both the entered domain and
+     the one it redirects to) as "official";
    - accept government domains (e.g. sec.gov filings) as "regulatory";
    - reject pages that look like people/contact-data listings (email formats,
      phone numbers, "reveal contact" prompts) - judged by URL and content
@@ -27,7 +28,7 @@ from dataclasses import dataclass
 from typing import Callable
 from urllib.parse import urlparse
 
-from entities import registrable_domain
+from entities import is_company_url
 
 SOURCE_TYPES = ["official", "regulatory", "news", "reference", "professional_profile",
                 "people_data_aggregator", "other"]
@@ -65,7 +66,7 @@ def _host(url: str) -> str:
     return urlparse(url).netloc.lower().split(":")[0]
 
 
-def rule_verdict(url: str, text: str, company_domain: str,
+def rule_verdict(url: str, text: str, company_domain: str | tuple[str, ...],
                  check_access: bool = True) -> Verdict | None:
     """Deterministic decision, or None if the page needs an LLM assessment."""
     text = text or ""
@@ -75,8 +76,7 @@ def rule_verdict(url: str, text: str, company_domain: str,
             return Verdict(False, "other", "no readable public content", "rule")
         if _LOGIN_URL.search(path) or (_LOGIN_TEXT.search(text[:4000]) and len(text) < 4000):
             return Verdict(False, "other", "requires login to read", "rule")
-    domain = registrable_domain(url)
-    if domain == registrable_domain(company_domain):
+    if is_company_url(url, company_domain):
         return Verdict(True, "official", "company's own website", "rule")
     if _host(url).endswith(".gov"):
         return Verdict(True, "regulatory", "government / regulatory source", "rule")
@@ -91,7 +91,8 @@ def rule_verdict(url: str, text: str, company_domain: str,
 Classifier = Callable[[list[dict]], list[tuple[str, bool, str]]]
 
 
-def evaluate(items: list[dict], company_domain: str, classifier: Classifier | None,
+def evaluate(items: list[dict], company_domain: str | tuple[str, ...],
+             classifier: Classifier | None,
              check_access: bool = True,
              log: Callable[[str], None] = lambda _m: None) -> list[Verdict]:
     """Verdict for every item (dicts with url/title/text), in order."""
@@ -118,12 +119,12 @@ def evaluate(items: list[dict], company_domain: str, classifier: Classifier | No
     return verdicts  # type: ignore[return-value]
 
 
-def trusted_type(url: str, source_type: str, company_domain: str) -> str:
+def trusted_type(url: str, source_type: str, company_domain: str | tuple[str, ...]) -> str:
     """"official" only for the company's own domain and "regulatory" only for
     government domains; the same label from an LLM becomes "reference"."""
     source_type = source_type if source_type in SOURCE_TYPES else "other"
     if source_type in ("official", "regulatory"):
-        if registrable_domain(url) == registrable_domain(company_domain):
+        if is_company_url(url, company_domain):
             return "official"
         if _host(url).endswith(".gov"):
             return "regulatory"

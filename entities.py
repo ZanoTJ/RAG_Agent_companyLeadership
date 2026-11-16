@@ -217,6 +217,7 @@ _HEAD = re.compile(r"\bhead\b")
 _DIRECTOR = re.compile(r"\b(director|general manager|gm)\b")
 _BOARD_WORDS = re.compile(r"\b(board|independent|non executive|lead director|chair\w*|trustee)\b")
 _NOT_CSUITE = re.compile(r"\bchief of staff\b|\beditor in chief\b|\bcommander in chief\b")
+_GENERAL_COUNSEL = re.compile(r"(?<!deputy )(?<!associate )(?<!assistant )\bgeneral counsel\b")
 _NON_JOB = re.compile(r"\b(founder|board|director|chair\w*|investor|advisor|adviser|"
                       r"partner|member|trustee|owner)\b")
 
@@ -248,6 +249,8 @@ def leadership_level(title: str, label: str = "") -> str | None:
         return "executive"
     if _SENIOR_VP.search(t):
         return "vp"
+    if _GENERAL_COUNSEL.search(t):  # a bare General Counsel is the top legal executive
+        return "executive"
     if _HEAD.search(t):
         return "department_head"
     if _DIRECTOR.search(t) and not _BOARD_WORDS.search(t) and label == "department_head":
@@ -297,22 +300,30 @@ def registrable_domain(url_or_host: str) -> str:
     return ".".join(labels[-2:])
 
 
+def is_company_url(url: str, company_domains: str | tuple[str, ...]) -> bool:
+    """On the company's own site. `company_domains` is one domain or several (e.g. the
+    domain the user entered and the one it redirects to: meetcampfire.com -> campfire.ai)."""
+    domains = (company_domains,) if isinstance(company_domains, str) else company_domains
+    return registrable_domain(url) in {registrable_domain(d) for d in domains}
+
+
 def _is_gov(url: str) -> bool:
     return urlparse(url).netloc.lower().split(":")[0].endswith(".gov")
 
 
-def source_tier(url: str, company_domain: str, source_type: str = "") -> int:
+def source_tier(url: str, company_domain: str | tuple[str, ...], source_type: str = "") -> int:
     """1 = company's own domain (any subdomain) or a government filing - decided by
     the URL only, never by an LLM label; 2 = other accepted public sources."""
-    if registrable_domain(url) == registrable_domain(company_domain) or _is_gov(url):
+    if is_company_url(url, company_domain) or _is_gov(url):
         return 1
     return 2
 
 
-def name_authority(url: str, company_domain: str, source_type: str = "") -> int:
+def name_authority(url: str, company_domain: str | tuple[str, ...],
+                   source_type: str = "") -> int:
     """For choosing a display name: the company's own site (how it refers to its
     people) > filings (often legal names) > other public sources."""
-    if registrable_domain(url) == registrable_domain(company_domain):
+    if is_company_url(url, company_domain):
         return 0
     return source_tier(url, company_domain, source_type)
 
@@ -371,7 +382,7 @@ def _record_date(r: dict, fetched: tuple[int, int, int]) -> tuple[int, int, int]
     return parse_date(r.get("as_of"))
 
 
-def _scope_of(title: str, other: str, company: str) -> bool:
+def _scope_of(title: str, other: str, company: tuple[str, ...]) -> bool:
     """True if `other` is `title` plus a scope other than the company itself:
     'President and COO' -> 'President and COO of TradePMR' (not '... of Robinhood')."""
     base, longer = _norm_title(title), _norm_title(other)
@@ -380,7 +391,7 @@ def _scope_of(title: str, other: str, company: str) -> bool:
     extra = set(longer[len(base):].split()) - {"of", "at", "by", "the", "for", "inc", "llc"}
     if extra & _TITLE_WORDS:
         return False  # more roles ("... Co-Founder and President"), not a scope
-    return bool(extra - {company.split(".")[0]})
+    return bool(extra - {registrable_domain(d).split(".")[0] for d in company})
 
 
 _TITLE_WORDS = {"and", "founder", "co", "cofounder", "president", "chairman", "chair", "ceo",
@@ -402,7 +413,7 @@ def _is_own_profile(r: dict, parts: NameParts) -> bool:
 
 
 def _is_live_company_page(r: dict) -> bool:
-    return (registrable_domain(r["source_url"]) == r["_company"]
+    return (is_company_url(r["source_url"], r["_company"])
             and not _ARTICLE_PATH.search(urlparse(r["source_url"]).path))
 
 def _supersedes(former: dict, claim: dict) -> bool:
@@ -420,7 +431,8 @@ def _supersedes(former: dict, claim: dict) -> bool:
         or (former["date"] == claim["date"] and former["source_url"] != claim["source_url"]))
 
 
-def resolve_people(records: list[dict], company_domain: str, company_name: str = "",
+def resolve_people(records: list[dict], company_domain: str | tuple[str, ...],
+                   company_name: str = "",
                    resolver: Resolver | None = None, fetched_on: date | None = None,
                    log: Callable[[str], None] = lambda _m: None,
                    stats: dict | None = None) -> list[dict]:
@@ -434,7 +446,7 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
     stats = stats if stats is not None else {}
     stats.update(checked=0, merged=0, failed=0, excluded_former=0, excluded=[])
     fetched = (fetched_on or date.today()).timetuple()[:3]
-    company = registrable_domain(company_domain)
+    company = (company_domain,) if isinstance(company_domain, str) else tuple(company_domain)
     at_company = re.compile(rf"\s+(at|@)\s+{re.escape(company_name)}\.?$", re.I) \
         if company_name else None
 

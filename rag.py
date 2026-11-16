@@ -51,22 +51,29 @@ def _make_client() -> genai.Client:
 
 
 RETRY_DELAYS = (3, 10)  # seconds to wait before the 2nd and 3rd pass over all models
+MAX_RETRY_SECONDS = 120  # total time budget across all retries
 
 
 def generate(contents, config: types.GenerateContentConfig):
     """generate_content with fallback to other models on transient errors, and a
-    short backoff before retrying when every model is overloaded."""
+    short backoff before retrying when every model is overloaded. Other errors
+    (e.g. 404 for a mistyped GEMINI_MODEL) are raised immediately."""
     models = [MODEL] + [m for m in FALLBACK_MODELS if m != MODEL]
+    deadline = time.monotonic() + MAX_RETRY_SECONDS
     last_err = None
-    for attempt in range(len(RETRY_DELAYS) + 1):
-        if attempt:
-            time.sleep(RETRY_DELAYS[attempt - 1])
+    for delay in (0, *RETRY_DELAYS):
+        if time.monotonic() + delay > deadline:
+            break
+        time.sleep(delay)
         for model in models:
+            if time.monotonic() > deadline:
+                break
             try:
                 return client().models.generate_content(model=model, contents=contents,
                                                         config=config)
             except genai.errors.APIError as e:
-                if e.code not in (404, 429, 500, 503, 504):
+                # a missing *fallback* model is skipped; a missing primary model is fatal
+                if e.code not in (429, 500, 503, 504) and not (e.code == 404 and model != MODEL):
                     raise
                 last_err = e
     raise RuntimeError(f"All Gemini models failed. Last error: {last_err}")
@@ -506,6 +513,8 @@ def ingest_company(url: str, log=print) -> int:
         name = scraper.bare_domain(base).split(".")[0].title()
         pages = []
     domain = scraper.bare_domain(base)
+    # The entered domain and the one it redirects to are both the company's own site.
+    domains = tuple(dict.fromkeys([domain, scraper.bare_domain(scraper.normalize_url(url))]))
     context = (scraper.site_description(pages[0].text) if pages else "") or "(unknown)"
     report = {"input_url": url, "company_url": base, "pages": [], "extracted": 0,
               "rejected_records": [], "excluded_people": [], "corroboration": [],
@@ -518,8 +527,8 @@ def ingest_company(url: str, log=print) -> int:
         name, base, seen_urls={p.url for p in crawled}, log=log)
 
     # 1. Evaluate every source BEFORE extraction and storage (final URLs after redirects).
-    accepted = (_evaluate_pages(crawled, domain, classifier, "company site", report, log)
-                + _evaluate_pages(found_pages, domain, classifier, "search", report, log))
+    accepted = (_evaluate_pages(crawled, domains, classifier, "company site", report, log)
+                + _evaluate_pages(found_pages, domains, classifier, "search", report, log))
     log(f"Sources: {len(accepted)} accepted, {len(report['pages']) - len(accepted)} skipped.")
 
     # 2. Extract from accepted sources only, then resolve entities.
@@ -529,20 +538,20 @@ def ingest_company(url: str, log=print) -> int:
                            "The previously collected data was kept.")
     resolver = _memo(make_llm_resolver(name, domain))
     stats: dict = {}
-    people = entities.resolve_people(found, domain, name, resolver=resolver, log=log,
+    people = entities.resolve_people(found, domains, name, resolver=resolver, log=log,
                                      stats=stats)
 
     # 3. Look for independent sources for weakly supported people, then resolve again.
-    targets = _weakly_supported(people, stats["excluded"], domain)
+    targets = _weakly_supported(people, stats["excluded"], domains)
     if targets and search.tavily_available():
         seen = {search.page_key(p["url"]) for p in report["pages"]}
-        extra = _corroborate(name, domain, targets, seen, classifier, report, log)
+        extra = _corroborate(name, domains, targets, seen, classifier, report, log)
         if extra:
             accepted += extra
             found += _extract_all(name, domain, context, extra, report, log)
             stats = {}
-            people = entities.resolve_people(found, domain, name, resolver=resolver, log=log,
-                                             stats=stats)
+            people = entities.resolve_people(found, domains, name, resolver=resolver,
+                                             log=log, stats=stats)
 
     # 4. Replace the stored people, source passages, and report in one transaction.
     report["excluded_people"] = [{k: e[k] for k in ("name", "title", "reason")}
@@ -736,7 +745,8 @@ def _llm_answer(context: str, question: str, history: list[dict] | None) -> Answ
                        sufficient=True, missing_info="")
 
 
-_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
+# URLs may contain balanced parentheses, e.g. https://en.wikipedia.org/wiki/Foo_(company)
+_LINK = re.compile(r"\[([^\]]+)\]\((https?://(?:[^()\s]|\([^()\s]*\))+)\)")
 
 
 def clean_answer(text: str, allowed_urls: set[str]) -> str:
