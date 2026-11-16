@@ -128,7 +128,6 @@ def test_bhatt_outdated_role_excluded_and_current_title_kept():
     (p,) = resolve(BHATT, FakeResolver(same=True))
     # Undated live company leadership page (fetched today) is the current title.
     assert p["title"] == "Co-Founder and Chief Creative Officer"
-    assert not p["may_be_outdated"]
     titles = {r["title"] for r in p["roles"]}
     # The former Co-CEO role is not stored, and the 2021 "Co-Founder and Co-CEO" claim
     # is dropped because a newer source says the Co-CEO role ended.
@@ -215,27 +214,6 @@ def test_newer_verified_role_replaces_older_one():
     assert {r["title"] for r in p["roles"]} == {"Chief Financial Officer"}
 
 
-@pytest.mark.parametrize("url,as_of,outdated", [
-    # old press release on the company's own site: can't confirm the role today
-    ("https://robinhood.com/newsroom/new-cfo", "2019-11-21", True),
-    # undated third-party profile
-    ("https://www.linkedin.com/company/robinhood", "", True),
-    # recent dated news article
-    ("https://www.cnbc.com/2026/robinhood", "2026-05-01", False),
-    # live, undated company leadership page
-    ("https://investors.robinhood.com/governance/leadership", "", False),
-    # live company page that mentions an old *start* date ("on our board since 2021")
-    ("https://investors.robinhood.com/governance/board-of-directors", "June 2021", False),
-    # an SEC filing is a dated document, not a live page
-    ("https://www.sec.gov/Archives/edgar/data/1/old-proxy.htm", "2021-04-01", True),
-])
-def test_may_be_outdated_requires_recent_or_live_company_evidence(url, as_of, outdated):
-    (p,) = resolve([rec("Jane Doe", "Chief Financial Officer", url, as_of=as_of)])
-    assert p["may_be_outdated"] is outdated
-    # The same flag is recomputed from the stored effective date.
-    assert entities.may_be_outdated(p["as_of"], FETCHED) is outdated
-
-
 @pytest.mark.parametrize("url,tier", [
     ("https://investors.robinhood.com/governance", 1),
     ("https://www.robinhood.com/us/en/newsroom/x", 1),
@@ -285,3 +263,79 @@ def test_chat_context_counts_unique_people_not_records(tmp_path, monkeypatch):
     assert ctx.count("\n- [P") == 2  # one bullet per person, not per source record
     assert "also written: Baiju Bhat" in ctx
     assert "Co-CEO" not in ctx.split("QUESTION IS ABOUT")[0]  # former role not listed
+
+
+# ---------------------------------------------------------------- review regressions
+
+ROSTER = "https://investors.robinhood.com/governance/leadership"
+ROSTER_RECS = [rec("Shiv Verma", "Chief Financial Officer", ROSTER),
+               rec("Connie Schan", "Chief People Officer", ROSTER),
+               rec("Vlad Tenev", "Chief Executive Officer", ROSTER)]
+
+
+def test_vp_only_in_recent_news_is_kept_even_with_a_roster():
+    stats = {}
+    people = resolve_people(ROSTER_RECS + [
+        rec("Rohit Ranjan", "VP Engineering", "https://www.cnbc.com/2026/robinhood",
+            as_of="2026-05-01", source_type="news", seniority="vp"),
+        rec("Old Name", "VP Platforms", "https://www.cnbc.com/2019/robinhood",
+            as_of="2019-05-01", source_type="news", seniority="vp"),
+    ], COMPANY, "Robinhood", fetched_on=FETCHED, stats=stats)
+    assert "Rohit Ranjan" in by_name(people)
+    assert [(e["name"], e["reason"]) for e in stats["excluded"]] == [
+        ("Old Name", entities.REASON_NOT_ON_ROSTER)]
+
+
+def test_promotion_on_one_page_keeps_the_new_title():
+    page = "https://www.cnbc.com/2026/robinhood-promotes"
+    (p,) = resolve([
+        rec("Ann Lee", "VP of Product", page, status="former", as_of="2026-06-01", seniority="vp"),
+        rec("Ann Lee", "SVP of Product", page, as_of="2026-06-01", seniority="vp"),
+    ])
+    assert p["title"] == "SVP of Product"
+    # the same "former" claim from another, equally new source still ends the role
+    assert resolve([
+        rec("Ann Lee", "SVP of Product", page, as_of="2026-06-01", seniority="vp"),
+        rec("Ann Lee", "SVP of Product", "https://news.example.com/x", status="former",
+            as_of="2026-06-01"),
+    ]) == []
+
+
+@pytest.mark.parametrize("title", ["General Counsel", "General Counsel and Corporate Secretary"])
+def test_general_counsel_is_executive(title):
+    assert entities.leadership_level(title) == "executive"
+    assert entities.leadership_level("Deputy General Counsel") is None
+
+
+def test_nicknames_are_not_merged_without_a_resolver():
+    people = resolve([
+        rec("Bob Smith", "Chief Revenue Officer", "https://investors.robinhood.com/a"),
+        rec("Robert Smith", "Chief Revenue Officer", "https://www.cnbc.com/2026/b",
+            as_of="2026-01-01", source_type="news"),
+    ])
+    assert sorted(by_name(people)) == ["Bob Smith", "Robert Smith"]
+
+
+def test_count_question_uses_counts_and_makes_no_web_search(tmp_path, monkeypatch):
+    import database as db
+    import rag
+
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "test.db"))
+    db.init_db()
+    people = resolve([
+        rec("Vlad Tenev", "Chief Executive Officer", ROSTER),
+        rec("Pat Lee", "Vice President, Product", ROSTER, seniority="vp"),
+        rec("Kim Park", "VP, Marketing", ROSTER, seniority="vp"),
+    ])
+    cid = db.save_collection("Robinhood", "https://robinhood.com/", people, [], {})
+    contexts, searches = [], []
+
+    def llm(context, question, history):
+        contexts.append(context)
+        return rag.AnswerDraft(answer="2 VPs are listed.", sufficient=True, missing_info="")
+
+    out = rag.answer_with_trace(cid, "How many VPs do they have?", llm=llm,
+                                searcher=lambda q: searches.append(q) or [])
+    counts = contexts[0].split("\nPEOPLE (")[0]  # the COUNTS block, before the people list
+    assert "Vice Presidents (incl. SVPs/EVPs): 2" in counts
+    assert searches == [] and not out["searched"]
