@@ -321,7 +321,7 @@ def test_conflict_is_stored_and_shown(tmp_path, monkeypatch):
     ], domain="acme.com"), [])
     leaders = db.get_leaders(cid)
     assert all(l["conflict"] for l in leaders)
-    assert all(r["Title"].endswith("(sources disagree)") for r in views.people_rows(leaders))
+    assert all(r["Title"].endswith("(sources disagree)") for r in views.summary_rows(leaders))
     assert len(views.disagreements(leaders)) == 2
 
 

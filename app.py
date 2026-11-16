@@ -1,6 +1,5 @@
 """Streamlit UI: collect a company's leadership, then chat about it."""
 
-import pandas as pd
 import streamlit as st
 
 import database as db
@@ -61,18 +60,13 @@ with st.expander(f"Leadership ({len(leaders)} people)", expanded=not leaders or 
     st.caption("Collected from public sources (company website, filings, news, public "
                "profiles). The list may not include every leader.")
     if leaders:
-        st.dataframe(
-            pd.DataFrame(views.people_rows(leaders), columns=views.PEOPLE_COLUMNS),
-            column_config={
-                "Source": st.column_config.LinkColumn("Source"),
-                "Profile": st.column_config.LinkColumn("Profile"),
-                "More sources": st.column_config.ListColumn("More sources"),
-            },
-            hide_index=True,
-            width="stretch",
-        )
+        st.markdown(views.summary_html(leaders), unsafe_allow_html=True)
         for note in views.disagreements(leaders):
             st.warning(f"Unresolved: {note}")
+        st.markdown("**Person details**")
+        for p in leaders:
+            with st.expander(views.person_label(p)):
+                st.markdown(views.details_html(p), unsafe_allow_html=True)
     else:
         st.warning(
             "No leaders found. The site may render its team page with JavaScript, "

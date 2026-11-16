@@ -174,12 +174,28 @@ def test_user_facing_tables_hide_internal_fields():
                 "title": "President and CEO", "department": "Executive", "seniority": "executive",
                 "source_url": "https://nvidia.com/a", "source_urls": "https://nvidia.com/a\nhttps://b",
                 "evidence": "...", "as_of": "2019"}]
-    (row,) = views.people_rows(leaders)
-    assert list(row) == views.PEOPLE_COLUMNS
-    assert row["Title"] == "President and CEO"
-    assert row["Also known as"] == "Jen-Hsun Huang" and row["More sources"] == ["https://b"]
+    (row,) = views.summary_rows(leaders)
+    assert list(row) == [name for name, _ in views.SUMMARY_COLUMNS]
+    assert row["Name"] == "Jensen Huang (Jen-Hsun Huang)" and row["Title"] == "President and CEO"
+    details = dict(views.person_details(leaders[0]))
+    assert details == {"As Of": "2019", "Source": "https://nvidia.com/a",
+                       "More sources": ["https://b"]}  # empty Bio/Profile left out
     for hidden in ("person_id", "status", "ID"):
-        assert hidden not in row
+        assert hidden not in row and hidden not in details
+
+
+def test_views_escape_untrusted_values():
+    p = {"name": "Eve <script>x</script>", "title": "CEO [x](javascript:alert(1))",
+         "seniority": "executive", "bio": "Raised $5M & <b>more</b>",
+         "profile_url": "javascript:alert(1)", "source_url": "https://ex.com/a_(b)",
+         "source_urls": 'https://ex.com/a_(b)\nhttps://ex.com/"onmouseover=x'}
+    table, details = views.summary_html([p]), views.details_html(p)
+    assert "<script>" not in table and "&lt;script&gt;" in table
+    assert "<b>more</b>" not in details and "&#36;5M" in details
+    assert 'href="javascript' not in details          # only http(s) URLs become links
+    assert '"onmouseover' not in details              # quotes in URLs are escaped
+    assert 'rel="noopener noreferrer"' in details and 'target="_blank"' in details
+    assert r"\[x\]\(javascript" in views.person_label(p)  # markdown link syntax escaped
 
 
 def test_counts_are_deterministic_and_count_unique_people():

@@ -1,0 +1,349 @@
+
+● The queries are never built from "meetcampfire.com". The crawler follows the
+  redirect first, and the templates use the company name and final domain it
+  lands on. The last Campfire collection, run from meetcampfire.com, confirms
+  this.
+
+  What happens, step by step:
+  1. scraper.crawl_company_site("meetcampfire.com") fetches the homepage, which
+     redirects to https://campfire.ai/.
+  2. The company name comes from that page's HTML, giving "Campfire". The domain
+     is the final one, campfire.ai (rag.py:480 (rag.py#L480)).
+  3. search.discover("Campfire", "https://campfire.ai/") fills each template
+     with name="Campfire" and domain="campfire.ai" (search.py:62
+     (search.py#L62)).
+
+  The resulting queries, from that run's log:
+
+  ┌───────────────────────────┬─────────────────────────────┬───────────────┐
+  │         Template          │        Actual query         │  Searched in  │
+  ├───────────────────────────┼─────────────────────────────┼───────────────┤
+  │ "{name}" {domain}         │ "Campfire" campfire.ai      │               │
+  │ leadership team           │ leadership team executives  │ whole web     │
+  │ executives                │                             │               │
+  ├───────────────────────────┼─────────────────────────────┼───────────────┤
+  │ "{name}" {domain} CEO     │ "Campfire" campfire.ai CEO  │ whole web     │
+  │ founder co-founder        │ founder co-founder          │               │
+  ├───────────────────────────┼─────────────────────────────┼───────────────┤
+  │ "{name}" appoints OR      │ "Campfire" appoints OR      │ whole web     │
+  │ names chief officer       │ names chief officer         │               │
+  ├───────────────────────────┼─────────────────────────────┼───────────────┤
+  │ "{name}" {domain} vice    │ "Campfire" campfire.ai vice │ whole web     │
+  │ president OR "head of"    │  president OR "head of"     │               │
+  ├───────────────────────────┼─────────────────────────────┼───────────────┤
+  │ "{name}" executive        │ "Campfire" executive        │               │
+  │ officers directors SEC    │ officers directors SEC      │ whole web     │
+  │ filing proxy              │ filing proxy                │               │
+  ├───────────────────────────┼─────────────────────────────┼───────────────┤
+  │ "{name}" {domain} chief   │ "Campfire" campfire.ai      │               │
+  │ marketing officer head of │ chief marketing officer     │ whole web     │
+  │  marketing                │ head of marketing           │               │
+  ├───────────────────────────┼─────────────────────────────┼───────────────┤
+  │ {name} CTO engineering    │ Campfire CTO engineering    │ only          │
+  │ team leadership           │ team leadership             │ campfire.ai   │
+  ├───────────────────────────┼─────────────────────────────┼───────────────┤
+  │ {name} {domain}           │ Campfire campfire.ai        │ only          │
+  │ leadership team           │ leadership team             │ linkedin.com  │
+  └───────────────────────────┴─────────────────────────────┴───────────────┘
+
+  After the search:
+  - Results that don't mention "campfire" or "campfire.ai" are dropped.
+  - Because "Campfire" is a common name, two queries leave out the domain and
+    pull in namesakes: Campfire Interactive, Campfire Capital, Camp Fire, the
+    Brussels agency. The source check's "same company?" answer rejects those
+    before extraction.
+  - The company is stored under https://campfire.ai/, so entering either domain
+    updates the same record.
+
+  Gaps tied to the old domain:
+  - If the redirect fails, for example the site is down or blocks bots, the
+    fallback uses the input as typed. The name becomes "Meetcampfire" and the
+    domain meetcampfire.com, which would give poor queries and be stored as a
+    separate company.
+  - Pages still served from meetcampfire.com aren't recognized as Campfire's own
+    site, because only campfire.ai counts as official. Those pages go to Gemini
+    and can be labeled news or reference at most. In practice that domain now
+    redirects, so this rarely matters.
+  - Searches never use the old name: the LinkedIn company page is
+    linkedin.com/company/meetcampfire, but no query includes "meetcampfire".
+    Search still finds it today through "Campfire campfire.ai".
+
+  If you want, I can record the input domain as a second official domain
+  whenever it redirects. That's a small change that closes the second gap.
+
+> <ide_opened_file>The user opened the file c:\OneDrive\OneDrive - California
+  State University, Sacramento\Desktop\Work\Volt\project_Company Leadership RAG
+  Agent\search.py in the IDE. This may or may not be related to the current
+  task.</ide_opened_file>
+
+> @search.py  takes so long to look over the information. Explain how to
+  optimize the time efficiency before you edit the code with my confirmation.
+  ⎿  Read search.py (119 lines)
+  ⎿  Read search.py (119 lines)
+  ⎿  Referenced file rag.py
+  ⎿  Referenced file entities.py
+  ⎿  Read app.py (107 lines)
+  ⎿  Read ..\..\..\..\..\..\Users\nabae\AppData\Local\Temp\claude\80d0ef42de8d6d
+     3d\fda61ead-6204-4a16-a364-89a33233d004\scratchpad\fix_readme.py (11 lines)
+
+● Compacted using a summary written while you were away · turn off with
+  "idleCompaction": false in settings.json
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● I haven't changed anything yet. From the code, here is where the time goes and
+  what I'd change.
+
+  Why it's slow
+
+  1. The 13 searches run one at a time. discover() waits for each Tavily call to
+     finish before starting the next. Each call uses search_depth="advanced"
+     and requests the full page text, so it takes several seconds. The total
+     wait is the sum of all 13.
+  2. There are 13 queries now, up from 8, and several overlap. Every extra query
+     can return up to 5 more pages, and each page then goes through two Gemini
+     calls: the source check and the extraction. Most of the collection time is
+     probably spent in Gemini, not Tavily, so redundant queries cost time twice.
+     The overlaps:
+     - The four "head of" … queries mostly repeat "{name}" {domain} vice
+       president OR "head of".
+     - {domain} CEO CTO CFO COO CMO repeats the CEO/founder and CMO queries.
+     - {domain} vice president VP SVP EVP and {domain} VP engineering product
+       marketing sales have no company name in them. They tend to return loosely
+       related pages that pass the cheap "mentions the domain" filter and then
+       get thrown out by Gemini, after it has already spent time on them.
+  3. The follow-up searches for weakly supported people also run one at a time.
+     rag._corroborate does up to 10 web_search calls in sequence.
+
+  Proposed changes, from biggest gain to smallest
+
+  #: A
+  Change: Run the discovery queries in parallel (ThreadPoolExecutor, about 5
+    workers, the same pattern already used for classification and extraction),
+    then dedupe the results in template order
+  Expected effect: The search step takes about as long as its slowest few
+  queries
+    instead of all 13 added up
+  Risk: None for results: the same pages come back, and the order stays
+    deterministic
+  ────────────────────────────────────────
+  #: B
+  Change: Cut the templates to about 9: drop the two domain-only VP queries and
+    {domain} CEO CTO CFO COO CMO, and merge the four "head of" queries into two
+    (engineering/product/technology and marketing/sales/finance/people)
+  Expected effect: About 20 fewer candidate pages, so about 40 fewer Gemini
+  calls
+  Risk: Small; I'd check with a Campfire/Robinhood re-collection that nobody is
+    lost
+  ────────────────────────────────────────
+  #: C
+  Change: Run the follow-up searches in _corroborate in parallel
+  Expected effect: Up to 10 sequential searches become about 2 rounds
+  Risk: None
+  ────────────────────────────────────────
+  #: D
+  Change: Optional: use "basic" depth for the broad whole-web queries and keep
+    "advanced" for the site and LinkedIn queries
+  Expected effect: Faster Tavily calls at half the credits
+  Risk: Could miss some pages; I'd only do this if A–C aren't enough
+
+  A and C are small code changes with no new dependencies, and I'd add a test
+  that the parallel result matches the sequential order. B changes what gets
+  found, so it needs your approval and a re-collection to check (with a database
+  backup first).
+
+  My recommendation is A + C now, B after you've reviewed the trimmed template
+  list, and D only if needed. Before changing anything I can also time one
+  collection, split into Tavily vs. Gemini, so we optimize the part that is
+  actually slow. Which would you like?
+
+> <ide_selection>The user selected the lines 20 to 35 from c:\OneDrive\OneDrive
+  - California State University, Sacramento\Desktop\Work\Volt\project_Company
+  Leadership RAG Agent\search.py:
+  QUERY_TEMPLATES = [
+      ('"{name}" {domain} leadership team executives', None),
+      ('"{name}" executive officers directors SEC filing proxy', None),
+      ("{name} {domain} leadership team", ["linkedin.com"]),
+
+  ('"{name}" {domain} CEO founder co-founder', None),
+  ('{domain} CEO CTO CFO COO CMO', None),
+
+  ('"{name}" {domain} vice president OR "head of"', None),
+  ('{domain} VP engineering product marketing sales', None),
+
+  ('"{name}" {domain} chief marketing officer head of marketing', None),
+
+  ('"{name}" {domain} "head of" department', None),
+  ('"{name}" {domain} head of engineering product technology marketing sales
+  partnerships finance opearations people', None)
+  ]
+
+  This may or may not be related to the current task.</ide_selection>
+
+> I cut the queries based on your B. Review this then apply A and C. Backup the
+  files if you will change any code.
+
+  Read 2 files, ran 1 shell command (ctrl+o to expand)
+
+● Your trimmed list dropped the "site" query, which an existing test checks for.
+  I'll note that in the review. Next, the parallel changes:
+
+● Update(search.py)
+  ⎿  Added 14 lines, removed 4 lines
+      63      seen = {page_key(u) for u in (seen_urls or set())}
+      64      pages: list[Page] = []
+      65  
+      66 -    for template, where in QUERY_TEMPLATES:                    
+      66 +    def run(template_where):                                   
+      67 +        template, where = template_where                       
+      68          query = template.format(name=company_name, domain=domai
+          n)
+      69          try:
+      69 -            resp = client.search(                              
+      70 +            return query, client.search(                       
+      71                  query,
+      72                  search_depth="advanced",
+      73                  max_results=RESULTS_RESTRICTED if where else RE
+          SULTS_PER_QUERY,
+      74                  include_raw_content="text",
+      75                  include_domains=[domain] if where == "site" els
+          e where,
+      75 -            )                                                  
+      76 +            ), None                                            
+      77          except Exception as e:  # network / quota errors should
+          n't abort ingestion
+      77 -            log(f"Tavily search failed for '{query}': {e}")    
+      78 +            return query, None, e                              
+      79 +                                                               
+      80 +    # Queries run concurrently; results are merged in template 
+         +order so dedup and the                                         
+      81 +    # page list are the same as a sequential run.              
+      82 +    with ThreadPoolExecutor(max_workers=SEARCH_WORKERS) as pool
+         +:                                                              
+      83 +        responses = list(pool.map(run, QUERY_TEMPLATES))       
+      84 +                                                               
+      85 +    for query, resp, err in responses:                         
+      86 +        if err is not None:                                    
+      87 +            log(f"Tavily search failed for '{query}': {err}")  
+      88              continue
+      89  
+      90          new = 0
+
+● Update(search.py)
+  ⎿  Added 1 line
+      35  ]
+      36  RESULTS_PER_QUERY = 5
+      37  RESULTS_RESTRICTED = 10  # site- or domain-restricted queries
+      38 +SEARCH_WORKERS = 5  # concurrent Tavily requests               
+      39  
+      40  
+      41  def page_key(url: str) -> str:
+
+● Update(search.py)
+  ⎿  Added 1 line
+       6  """
+       7  
+       8  import os
+       9 +from concurrent.futures import ThreadPoolExecutor              
+      10  
+      11  from dotenv import load_dotenv
+      12  
+
+● Update(rag.py)
+  ⎿  Added 12 lines, removed 4 lines
+      438                   classifier, report: dict, log) -> list:
+      439      """One targeted search per person for independent sources;
+            new pages must mention
+      440      the person and the company and pass the same source policy
+           ."""
+      441 -    new_pages = []                                            
+      442 -    for t in targets:                                         
+      441 +    def run(t):                                               
+      442          query = f'"{t["name"]}" "{name}" {" ".join(t["title"].
+           split()[:6])}'
+      443          try:
+      445 -            results = search.web_search(query)                
+      444 +            return search.web_search(query), None             
+      445          except Exception as e:
+      447 -            log(f"Corroboration search failed for {t['name']}:
+          - {e}")                                                        
+      446 +            return None, e                                    
+      447 +                                                              
+      448 +    # Searches run concurrently; results are processed in targ
+          +et order (deterministic).                                     
+      449 +    with ThreadPoolExecutor(max_workers=search.SEARCH_WORKERS)
+          + as pool:                                                     
+      450 +        responses = list(pool.map(run, targets))              
+      451 +                                                              
+      452 +    new_pages = []                                            
+      453 +    for t, (results, err) in zip(targets, responses):         
+      454 +        if err is not None:                                   
+      455 +            log(f"Corroboration search failed for {t['name']}:
+          + {err}")                                                      
+      456              continue
+      457          parts = entities.parse_name(t["name"])
+      458          if not parts:
+
+● Next, tests that confirm the merge order stays deterministic even when calls
+  finish out of order:
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Most of these failures aren't from my edits. Checking where they come from:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I made the parallel changes (A and C) and backed up the code first. Your two
+  new tests pass, but the full suite now has 21 failures. Only one is tied to
+  your template list; the other 20 come from earlier edits, not from the
+  parallel code.
+
+  Review of your trimmed templates (10 queries)
+
+  1. The "site" query is gone. ("{name} CTO engineering team leadership",
+     "site") was the only query limited to the company's own site, and it's the
+     one that found Paul Nichols on campfire.ai. Removing it makes
+     test_discovery_searches_company_site_and_linkedin fail. I'd add it back.
+  2. There's a typo in the last query: "opearations" should be "operations".
+  3. The last query is too long. It has about 12 keywords, so the search engine
+     can't favor any of them. Splitting it in two would work better:
+     engineering/product/technology, then
+     marketing/sales/finance/operations/people. That's 11 queries in total, and
+     with the parallel change an extra query adds almost no time.
+  4. Two queries still have no company name: {domain} CEO CTO CFO COO CMO and
+     {domain} VP engineering product marketing sales. They work for a
+     distinctive domain like robinhood.com. They're the most likely to return
+     unrelated pages that Gemini then has to reject. You can keep them, but
+     they're the first I'd remove if collection is still slow.
+
+  I didn't change your list. Tell me if you want items 1–3 applied.
+
+  What changed in the code
+
+  - A, search.py: the discovery queries now run in parallel, 5 at a time
+    (SEARCH_WORKERS = 5). The results are still combined in the order of the
+    template list, so you get the same pages, in the same order, as a
+    one-at-a-time run.
+  - C, rag.py _corroborate: the follow-up searches for weakly supported people
+    also run in parallel and are handled in their original order. If one search
+    fails, it's logged and the others continue, as before.
+  - Tests added to tests/test_leadership_rules.py: in both, later calls finish
+    first, and the tests check that results still come out in the original
+    order. Both pass.
+  - Backups of the code before these changes are in backups/code/:
+    - search-before-parallel-20261115-220614.py
+    - rag-before-parallel-20261115-220614.py
+
+  The other 20 failing tests
+
+  - reresolve_company was removed from rag.py (6 tests). It was already missing
+    in your commit 290387a and in my backup, so the removal predates my edit.
+  - may_be_outdated is no longer in the entities.py output (14 tests in
+    test_entities.py and test_leadership_rules.py).
+
+  These look like intentional clean-ups in your 290387a commit, and the tests
+  weren't updated to match. Do you want me to update the tests to fit the new
+  code, or were those removals unintentional?
+
+  I haven't timed a real collection. Run Campfire or Robinhood to see the
+  speed-up.
