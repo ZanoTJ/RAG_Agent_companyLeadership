@@ -407,13 +407,17 @@ def _is_live_company_page(r: dict) -> bool:
 
 def _supersedes(former: dict, claim: dict) -> bool:
     """A 'former' record (e.g. "previously served as Co-CEO") cancels a current claim
-    of the same role when it is at least as new as that claim."""
+    of the same role when it is newer than that claim, or equally new but from another
+    source. Records from one page share its date, so on the same page "formerly VP of
+    Product, now SVP of Product" keeps the SVP claim."""
     fa, ca = role_tokens(former["title"]), role_tokens(claim["title"])
     same_role = (_norm_title(former["title"]) == _norm_title(claim["title"])
                  or (fa and fa <= ca)
                  # "Chief Technology Officer" ended -> a "CTO" claim ended too
                  or single_holder_roles(former["title"]) & single_holder_roles(claim["title"]))
-    return bool(same_role) and former["date"] != (0, 0, 0) and former["date"] >= claim["date"]
+    return bool(same_role) and former["date"] != (0, 0, 0) and (
+        former["date"] > claim["date"]
+        or (former["date"] == claim["date"] and former["source_url"] != claim["source_url"]))
 
 
 def resolve_people(records: list[dict], company_domain: str, company_name: str = "",
