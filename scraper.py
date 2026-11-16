@@ -149,7 +149,10 @@ def _score_links(html: str, page_url: str, domain: str) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------- public API
-
+"""
+1. Redirect to existing domain    ex: meetcapfire.com -> campfire.ai
+2. Return url, company name, source pages
+"""
 def crawl_company_site(url: str, log=print) -> tuple[str, str, list[Page]]:
     """Return (base_url, company_name, pages) for the company's own website."""
     base = normalize_url(url)

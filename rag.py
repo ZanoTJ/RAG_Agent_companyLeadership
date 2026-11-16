@@ -438,13 +438,21 @@ def _corroborate(name: str, domain: str, targets: list[dict], seen: set[str],
                  classifier, report: dict, log) -> list:
     """One targeted search per person for independent sources; new pages must mention
     the person and the company and pass the same source policy."""
-    new_pages = []
-    for t in targets:
+    def run(t):
         query = f'"{t["name"]}" "{name}" {" ".join(t["title"].split()[:6])}'
         try:
-            results = search.web_search(query)
+            return search.web_search(query), None
         except Exception as e:
-            log(f"Corroboration search failed for {t['name']}: {e}")
+            return None, e
+
+    # Searches run concurrently; results are processed in target order (deterministic).
+    with ThreadPoolExecutor(max_workers=search.SEARCH_WORKERS) as pool:
+        responses = list(pool.map(run, targets))
+
+    new_pages = []
+    for t, (results, err) in zip(targets, responses):
+        if err is not None:
+            log(f"Corroboration search failed for {t['name']}: {err}")
             continue
         parts = entities.parse_name(t["name"])
         if not parts:

@@ -6,6 +6,7 @@ built only from the company name and domain - nothing company-specific is hardco
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 
@@ -19,17 +20,25 @@ load_dotenv()
 # where: None = whole web, "site" = the company's own domain, or a list of domains.
 QUERY_TEMPLATES = [
     ('"{name}" {domain} leadership team executives', None),
-    ('"{name}" {domain} CEO founder co-founder', None),
-    ('"{name}" appoints OR names chief officer', None),
-    ('"{name}" {domain} vice president OR "head of"', None),
     ('"{name}" executive officers directors SEC filing proxy', None),
-    ('"{name}" {domain} chief marketing officer head of marketing', None),
-    # Plain keywords (no OR syntax) work best for these two; they get more results.
-    ("{name} CTO engineering team leadership", "site"),
     ("{name} {domain} leadership team", ["linkedin.com"]),
+    
+    ('"{name}" {domain} CEO founder co-founder', None),
+    ('"{name}" {domain} CEO CTO CFO COO CMO', None),
+
+    ('"{name}" {domain} vice president OR "head of"', None),
+    ('"{name}" {domain} VP engineering product marketing sales', None),
+
+    ('"{name}" {domain} chief marketing officer head of marketing', None),
+
+    ('"{name}" {domain} "head of" department', None),
+    ('"{name}" {domain} head of engineering product technology', None),
+    ('"{name}" {domain} head of marketing sales partnerships', None),
+    ('"{name}" {domain} head of finance operations people', None),
 ]
 RESULTS_PER_QUERY = 5
 RESULTS_RESTRICTED = 10  # site- or domain-restricted queries
+SEARCH_WORKERS = 5  # concurrent Tavily requests
 
 
 def page_key(url: str) -> str:
@@ -58,18 +67,28 @@ def discover(company_name: str, company_url: str, seen_urls: set[str] | None = N
     seen = {page_key(u) for u in (seen_urls or set())}
     pages: list[Page] = []
 
-    for template, where in QUERY_TEMPLATES:
+    def run(template_where):
+        template, where = template_where
         query = template.format(name=company_name, domain=domain)
         try:
-            resp = client.search(
+            return query, client.search(
                 query,
                 search_depth="advanced",
                 max_results=RESULTS_RESTRICTED if where else RESULTS_PER_QUERY,
                 include_raw_content="text",
                 include_domains=[domain] if where == "site" else where,
-            )
+            ), None
         except Exception as e:  # network / quota errors shouldn't abort ingestion
-            log(f"Tavily search failed for '{query}': {e}")
+            return query, None, e
+
+    # Queries run concurrently; results are merged in template order so dedup and the
+    # page list are the same as a sequential run.
+    with ThreadPoolExecutor(max_workers=SEARCH_WORKERS) as pool:
+        responses = list(pool.map(run, QUERY_TEMPLATES))
+
+    for query, resp, err in responses:
+        if err is not None:
+            log(f"Tavily search failed for '{query}': {err}")
             continue
 
         new = 0
