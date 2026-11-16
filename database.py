@@ -14,8 +14,7 @@ CREATE TABLE IF NOT EXISTS companies (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,
     url         TEXT NOT NULL UNIQUE,
-    scraped_at  TEXT,              -- set only when a collection is stored successfully
-    collection_report  TEXT        -- JSON: sources/candidates found, rejected, accepted
+    scraped_at  TEXT               -- set only when a collection is stored successfully
 );
 
 CREATE TABLE IF NOT EXISTS leaders (
@@ -101,7 +100,7 @@ def init_db(db_path: str | None = None) -> None:
 # ---------------------------------------------------------------- companies
 
 def save_collection(name: str, url: str, people: list[dict], sources: list[dict],
-                    report: dict, db_path: str | None = None) -> int:
+                    db_path: str | None = None) -> int:
     """Replace a company's people, sources and search cache with a new collection in
     ONE transaction: if anything fails, the previous data stays untouched.
     `scraped_at` is set only here, i.e. only when the write succeeds."""
@@ -111,11 +110,10 @@ def save_collection(name: str, url: str, people: list[dict], sources: list[dict]
         cid = conn.execute("SELECT id FROM companies WHERE url = ?", (url,)).fetchone()["id"]
         for table in ("leaders", "sources", "search_cache"):
             conn.execute(f"DELETE FROM {table} WHERE company_id = ?", (cid,))
-        report["people"] = _insert_people(conn, cid, people)
+        _insert_people(conn, cid, people)
         conn.executemany(_SOURCE_SQL, [(cid, s["url"], s["content"], _now(), s.get("source_type", ""),
                                         s.get("published") or "", "collect") for s in sources])
-        conn.execute("UPDATE companies SET scraped_at = ?, collection_report = ? WHERE id = ?",
-                     (_now(), json.dumps(report), cid))
+        conn.execute("UPDATE companies SET scraped_at = ? WHERE id = ?", (_now(), cid))
     return cid
 
 

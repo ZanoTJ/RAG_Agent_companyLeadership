@@ -33,8 +33,8 @@ python -m pytest -q               # offline: LLM and search are faked, no keys n
 
 Enter a URL (e.g. `meetcampfire.com`) in the sidebar and click **Collect**, then ask
 e.g. *"Who's their CTO?"*, *"How many VPs do they have?"*, *"Who heads marketing?"*,
-*"Where is their CEO based?"*. The **Collection report** expander shows every source
-accepted or rejected and every person excluded, each with the reason.
+*"Where is their CEO based?"*. Collection progress, including every source and person
+that was skipped and why, is logged to the terminal.
 
 The app always calls the real Gemini API; fakes exist only in `tests/`.
 

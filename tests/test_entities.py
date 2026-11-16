@@ -253,9 +253,8 @@ def test_chat_context_counts_unique_people_not_records(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "test.db"))
     db.init_db()
     people = resolve(GALLAGHER + BHATT, FakeResolver(same=True))
-    report = {}
-    cid = db.save_collection("Robinhood", "https://robinhood.com/", people, [], report)
-    assert report["people"] == 2
+    cid = db.save_collection("Robinhood", "https://robinhood.com/", people, [])
+    assert len(db.get_leaders(cid)) == 2
 
     ctx, _urls = rag.build_context(cid, "How many executives are there?")
     assert "Unique people listed: 2" in ctx
@@ -327,7 +326,7 @@ def test_count_question_uses_counts_and_makes_no_web_search(tmp_path, monkeypatc
         rec("Pat Lee", "Vice President, Product", ROSTER, seniority="vp"),
         rec("Kim Park", "VP, Marketing", ROSTER, seniority="vp"),
     ])
-    cid = db.save_collection("Robinhood", "https://robinhood.com/", people, [], {})
+    cid = db.save_collection("Robinhood", "https://robinhood.com/", people, [])
     contexts, searches = [], []
 
     def llm(context, question, history):

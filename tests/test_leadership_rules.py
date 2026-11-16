@@ -318,7 +318,7 @@ def test_conflict_is_stored_and_shown(tmp_path, monkeypatch):
     cid = db.save_collection("Acme", "https://acme.com/", resolve([
         rec("Ann One", "CTO", "https://news.example.com/a", source_type="news"),
         rec("Bo Two", "CTO", "https://other.example.org/b", source_type="reference"),
-    ], domain="acme.com"), [], {})
+    ], domain="acme.com"), [])
     leaders = db.get_leaders(cid)
     assert all(l["conflict"] for l in leaders)
     assert all(r["Title"].endswith("(sources disagree)") for r in views.people_rows(leaders))
@@ -355,7 +355,7 @@ def test_departure_keeps_the_persons_other_current_role(tmp_path, monkeypatch):
     people = resolve([*PINNER, rec("Jeff Pinner", "Head of Platform Research",
                                    "https://investors.robinhood.com/governance/leadership",
                                    seniority="department_head")])
-    cid = db.save_collection("Robinhood", "https://robinhood.com/", people, [], {})
+    cid = db.save_collection("Robinhood", "https://robinhood.com/", people, [])
     (p,) = db.get_leaders(cid)
     assert p["title"] == "Head of Platform Research"  # the CTO claims are cancelled
     assert [r["title"] for r in db.get_role_history(cid)] == ["Head of Platform Research"]
@@ -408,9 +408,10 @@ def test_parallel_corroboration_keeps_target_order(monkeypatch):
 
     monkeypatch.setattr(search, "web_search", fake_search)
     monkeypatch.setattr(rag, "_evaluate_pages", lambda pages, *a: pages)
-    logs, report = [], {"corroboration": []}
+    logs = []
     targets = [{"name": n, "title": "VP Sales"} for n in ("Ann One", "Bo Two", "Cy Three")]
-    pages = rag._corroborate("Acme", "acme.com", targets, set(), None, report, logs.append)
+    pages = rag._corroborate("Acme", "acme.com", targets, set(), None, logs.append)
     assert [p.url for p in pages] == ["https://news.example.com/One", "https://news.example.com/Three"]
-    assert [c["name"] for c in report["corroboration"]] == ["Ann One", "Cy Three"]
+    assert [m.split(": ")[0] for m in logs if m.startswith("Corroboration search for")] == [
+        "Corroboration search for Ann One", "Corroboration search for Cy Three"]
     assert any("failed for Bo Two" in m for m in logs)

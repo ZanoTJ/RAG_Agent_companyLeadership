@@ -165,12 +165,6 @@ def test_ingest_never_stores_or_cites_rejected_sources(tmp_db, monkeypatch):
     assert all(r["source_url"] in cited for r in db.get_role_history(cid))
     # John Roe has a single non-official source: one corroboration search was made.
     assert len(searched) == 1 and '"John Roe"' in searched[0]
-    # The collection report records every source decision.
-    import json
-    report = json.loads(db.get_company(cid)["collection_report"])
-    assert len(report["pages"]) == 4 and report["people"] == 2
-    assert {p["url"] for p in report["pages"] if not p["accepted"]} == {aggregator.url, contact.url}
-    assert all(p["reason"] for p in report["pages"])
 
 
 # ---------------------------------------------------------------- views & counts
@@ -243,7 +237,7 @@ def nvidia(tmp_db):
                    "source_type": "official", "evidence": "Jensen Huang founded NVIDIA in 1993"}]}],
         [{"url": "https://www.nvidia.com/board/jensen-huang", "source_type": "official",
           "content": "Jensen Huang founded NVIDIA in 1993 and has served as CEO since its inception."}],
-        {})
+)
     return db, cid
 
 

@@ -396,18 +396,14 @@ def _passages(accepted: list, people: list[dict]) -> list[dict]:
 MAX_CORROBORATE = 10  # targeted searches per collection for weakly supported people
 
 
-def _evaluate_pages(pages: list, domain: str, classifier, origin: str, report: dict,
-                    log) -> list:
-    """Source policy on every page; returns the accepted (page, verdict) pairs and
-    records every decision in the collection report."""
+def _evaluate_pages(pages: list, domain, classifier, log) -> list:
+    """Source policy on every page; returns the accepted (page, verdict) pairs."""
     if not pages:
         return []
     verdicts = source_policy.evaluate([{"url": p.url, "text": p.text} for p in pages], domain,
                                       classifier, log=log)
     accepted = []
     for p, v in zip(pages, verdicts):
-        report["pages"].append({"url": p.url, "origin": origin, "accepted": v.accepted,
-                                "type": v.source_type, "reason": v.reason})
         if v.accepted:
             accepted.append((p, v))
         else:
@@ -415,12 +411,13 @@ def _evaluate_pages(pages: list, domain: str, classifier, origin: str, report: d
     return accepted
 
 
-def _extract_all(name: str, domain: str, context: str, accepted: list, report: dict,
-                 log) -> list[dict]:
-    """Extract from accepted pages that mention roles (in parallel; log from this thread)."""
+def _extract_all(name: str, domain: str, context: str, accepted: list,
+                 log) -> tuple[list[dict], bool]:
+    """Extract from accepted pages that mention roles (in parallel; log from this thread).
+    Returns the records and whether extraction failed on every candidate page."""
     found: list[dict] = []
+    failures = 0
     candidates = [(p, v) for p, v in accepted if scraper.mentions_roles(p.text)]
-    report["extraction_pages"] += len(candidates)
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {pool.submit(extract_leaders, name, domain, context, p): (p, v)
                    for p, v in candidates}
@@ -430,16 +427,15 @@ def _extract_all(name: str, domain: str, context: str, accepted: list, report: d
                 people, rejected = fut.result()
             except Exception as e:  # keep going if one page fails
                 log(f"Extraction failed for {page.url}: {e}")
-                report["extraction_failures"].append(page.url)
+                failures += 1
                 continue
             for rec in people:
                 rec["source_type"] = verdict.source_type
             found += people
-            report["extracted"] += len(people) + len(rejected)
-            report["rejected_records"] += rejected
-            note = f", {len(rejected)} rejected" if rejected else ""
-            log(f"{page.url}: {len(people)} verified{note}")
-    return found
+            for r in rejected:
+                log(f"Rejected {r['name']} ({r['title']}) from {page.url}: {r['reason']}")
+            log(f"{page.url}: {len(people)} verified, {len(rejected)} rejected")
+    return found, bool(candidates) and failures == len(candidates)
 
 
 def _memo(resolver):
@@ -465,8 +461,8 @@ def _weakly_supported(people: list[dict], excluded: list[dict], domain: str) -> 
     return out[:MAX_CORROBORATE]
 
 
-def _corroborate(name: str, domain: str, targets: list[dict], seen: set[str],
-                 classifier, report: dict, log) -> list:
+def _corroborate(name: str, domain, targets: list[dict], seen: set[str],
+                 classifier, log) -> list:
     """One targeted search per person for independent sources; new pages must mention
     the person and the company and pass the same source policy."""
     def run(t):
@@ -497,15 +493,14 @@ def _corroborate(name: str, domain: str, targets: list[dict], seen: set[str],
             seen.add(key)
             new_pages.append(p)
             added += 1
-        report["corroboration"].append({"name": t["name"], "new_pages": added})
         log(f"Corroboration search for {t['name']}: {added} new pages")
-    return _evaluate_pages(new_pages, domain, classifier, "corroboration", report, log)
+    return _evaluate_pages(new_pages, domain, classifier, log)
 
 
 def ingest_company(url: str, log=print) -> int:
     """Crawl site + Wikipedia + Tavily search -> source evaluation -> Gemini
     extraction -> entity resolution -> corroboration of weakly supported people ->
-    SQLite, with a collection report of every decision. Everything runs in memory;
+    SQLite. Every decision is logged. Everything runs in memory;
     the stored data is replaced in one transaction at the end, so a failed run
     leaves the previous collection untouched."""
     db.init_db()
@@ -522,9 +517,6 @@ def ingest_company(url: str, log=print) -> int:
     # The entered domain and the one it redirects to are both the company's own site.
     domains = tuple(dict.fromkeys([domain, scraper.bare_domain(scraper.normalize_url(url))]))
     context = (scraper.site_description(pages[0].text) if pages else "") or "(unknown)"
-    report = {"input_url": url, "company_url": base, "pages": [], "extracted": 0,
-              "rejected_records": [], "excluded_people": [], "corroboration": [],
-              "extraction_failures": [], "extraction_pages": 0}
     classifier = make_llm_classifier(name, domain)
 
     crawled = list(pages)
@@ -533,13 +525,13 @@ def ingest_company(url: str, log=print) -> int:
         name, base, seen_urls={p.url for p in crawled}, log=log)
 
     # 1. Evaluate every source BEFORE extraction and storage (final URLs after redirects).
-    accepted = (_evaluate_pages(crawled, domains, classifier, "company site", report, log)
-                + _evaluate_pages(found_pages, domains, classifier, "search", report, log))
-    log(f"Sources: {len(accepted)} accepted, {len(report['pages']) - len(accepted)} skipped.")
+    evaluated = crawled + found_pages
+    accepted = _evaluate_pages(evaluated, domains, classifier, log)
+    log(f"Sources: {len(accepted)} accepted, {len(evaluated) - len(accepted)} skipped.")
 
     # 2. Extract from accepted sources only, then resolve entities.
-    found = _extract_all(name, domain, context, accepted, report, log)
-    if report["extraction_pages"] and             len(report["extraction_failures"]) == report["extraction_pages"]:
+    found, all_failed = _extract_all(name, domain, context, accepted, log)
+    if all_failed:  # e.g. Gemini down: keep the previous data
         raise RuntimeError("Extraction failed for every page (is Gemini reachable?). "
                            "The previously collected data was kept.")
     resolver = _memo(make_llm_resolver(name, domain))
@@ -550,19 +542,17 @@ def ingest_company(url: str, log=print) -> int:
     # 3. Look for independent sources for weakly supported people, then resolve again.
     targets = _weakly_supported(people, stats["excluded"], domains)
     if targets and search.tavily_available():
-        seen = {search.page_key(p["url"]) for p in report["pages"]}
-        extra = _corroborate(name, domains, targets, seen, classifier, report, log)
+        seen = {search.page_key(p.url) for p in evaluated}
+        extra = _corroborate(name, domains, targets, seen, classifier, log)
         if extra:
             accepted += extra
-            found += _extract_all(name, domain, context, extra, report, log)
+            found += _extract_all(name, domain, context, extra, log)[0]
             stats = {}
             people = entities.resolve_people(found, domains, name, resolver=resolver,
                                              log=log, stats=stats)
 
-    # 4. Replace the stored people, source passages, and report in one transaction.
-    report["excluded_people"] = [{k: e[k] for k in ("name", "title", "reason")}
-                                 for e in stats["excluded"]]
-    return db.save_collection(name, base, people, _passages(accepted, people), report)
+    # 4. Replace the stored people and source passages in one transaction.
+    return db.save_collection(name, base, people, _passages(accepted, people))
 
 # ================================================================ hybrid answering
 

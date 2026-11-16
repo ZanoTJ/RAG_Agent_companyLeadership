@@ -1,7 +1,5 @@
 """Streamlit UI: collect a company's leadership, then chat about it."""
 
-import json
-
 import pandas as pd
 import streamlit as st
 
@@ -59,7 +57,6 @@ if not company_id:
     st.stop()
 
 leaders = db.get_leaders(company_id)
-company = db.get_company(company_id)
 with st.expander(f"Leadership ({len(leaders)} people)", expanded=not leaders or len(leaders) < 15):
     st.caption("Collected from public sources (company website, filings, news, public "
                "profiles). The list may not include every leader.")
@@ -81,22 +78,6 @@ with st.expander(f"Leadership ({len(leaders)} people)", expanded=not leaders or 
             "No leaders found. The site may render its team page with JavaScript, "
             "block automated requests, or not publish leadership publicly."
         )
-
-report = json.loads(company.get("collection_report") or "{}")
-if report:
-    with st.expander("Collection report", expanded=False):
-        pages = report.get("pages", [])
-        st.caption(f"{sum(p['accepted'] for p in pages)} sources accepted, "
-                   f"{sum(not p['accepted'] for p in pages)} rejected, "
-                   f"{len(report.get('excluded_people', []))} people excluded.")
-        st.markdown("**Sources**")
-        st.dataframe(pd.DataFrame(pages, columns=["accepted", "type", "reason", "url", "origin"]),
-                     column_config={"url": st.column_config.LinkColumn("url")},
-                     hide_index=True, width="stretch")
-        st.markdown("**Excluded people**")
-        st.dataframe(pd.DataFrame(report.get("excluded_people", []),
-                                  columns=["name", "title", "reason"]),
-                     hide_index=True, width="stretch")
 
 st.session_state.setdefault("messages", [])
 for msg in st.session_state.messages:
