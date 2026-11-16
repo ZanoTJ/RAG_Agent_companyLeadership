@@ -167,6 +167,9 @@ class Leader(BaseModel):
     status: Literal["current", "former", "unknown"]  # used during resolution, not stored
     as_of: str                     # date the page gives for this role, or ""
     evidence: str
+    location: str = ""             # professional base stated on the page, or ""
+    profile_url: str = ""          # public profile URL (e.g. LinkedIn) on the page, or ""
+    bio: str = ""                  # one short sentence from the page, or ""
 
 
 class LeaderList(BaseModel):
@@ -222,6 +225,12 @@ Rules:
   shows they lead that function, e.g. "Senior Director, Communications" on the company's
   leadership page, or "leads our sales team"), "board" (board of directors),
   "other" otherwise (including directors who work within a team without leading it).
+- location: the city/region where the page says the person works or is based
+  (professional base only, never a home address), else "".
+- profile_url: the person's public profile URL (e.g. linkedin.com/in/...) if it is
+  written in the page text, or {url} if this page IS the person's own profile, else "".
+- bio: one short sentence summarizing what the page says about the person's background
+  (e.g. previous employers, education), else "". Never guess or add outside knowledge.
 - relationship: "employee_or_board" only if the page shows the person works for or
   sits on the board of {company}. A name and title shown next to a quote praising
   {company} ("See <customer>'s story", case studies, testimonials) is a CUSTOMER:
@@ -284,6 +293,12 @@ def extract_leaders(company: str, domain: str, context: str,
                              "reason": reason})
             continue
         rec = {**p.model_dump(exclude={"relationship"}), "source_url": page.url}
+        # Profile data must come from this page: blank anything not grounded in it.
+        if _loose(p.location) not in haystack:
+            rec["location"] = ""
+        bare = re.sub(r"^(https?://)?(www\.)?", "", p.profile_url.strip().rstrip("/").lower())
+        if bare and bare not in page.text.lower() and bare not in page.url.lower():
+            rec["profile_url"] = ""
         rec["as_of"] = page_date or _page_date(p.as_of, "", date.today())
         out.append(rec)
     return out, rejected
@@ -652,9 +667,14 @@ def build_context(company_id: int, question: str, focus: list[dict] | None = Non
         title = p["title"] + (
             f" (unresolved: {p['conflict']})" if p.get("conflict") else "")
         lines.append(f"- [P{p['person_id']}] {p['name']}{alias} | {title} | "
-                     f"{p['department']} | {SENIORITY_LABEL.get(p['seniority'], 'Other')} | "
-                     f"source: {p['source_url']}")
+                     f"{p['department']} | {SENIORITY_LABEL.get(p['seniority'], 'Other')}"
+                     + "".join(f" | {label}: {p[k]}" for k, label in (
+                         ("location", "based in"), ("profile_url", "profile"), ("bio", "bio"))
+                         if p.get(k))
+                     + f" | source: {p['source_url']}")
         urls.update(u for u in (p["source_urls"] or p["source_url"]).split("\n") if u)
+        if p.get("profile_url"):
+            urls.add(p["profile_url"])
 
     if focus:
         roles = db.get_role_history(company_id)

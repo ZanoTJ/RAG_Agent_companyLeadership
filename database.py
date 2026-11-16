@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS leaders (
     aliases     TEXT,           -- JSON list of other spellings of this person's name
     as_of       TEXT,           -- effective date of the title's evidence (internal)
     conflict    TEXT,           -- unresolved disagreement between sources, if any
+    location    TEXT,           -- professional base (never a home address)
+    profile_url TEXT,           -- public profile, e.g. LinkedIn
+    bio         TEXT,           -- one short sentence from the sources
     UNIQUE (company_id, name, title)
 );
 
@@ -287,13 +290,14 @@ def _insert_people(conn, company_id: int, people: list[dict]) -> int:
         cur = conn.execute(
             """INSERT OR IGNORE INTO leaders
                (id, company_id, name, title, department, seniority, source_url,
-                source_urls, evidence, aliases, as_of, conflict)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                source_urls, evidence, aliases, as_of, conflict, location, profile_url, bio)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (p.get("id"), company_id, p["name"].strip(), (p.get("title") or "").strip(),
              (p.get("department") or "").strip(), p.get("seniority") or "other",
              p["source_url"], "\n".join(p.get("source_urls") or [p["source_url"]]),
              (p.get("evidence") or "").strip(), json.dumps(p.get("aliases") or []),
-             p.get("as_of") or "", p.get("conflict") or ""),
+             p.get("as_of") or "", p.get("conflict") or "", p.get("location") or "",
+             p.get("profile_url") or "", p.get("bio") or ""),
         )
         if not cur.rowcount:
             continue
@@ -329,7 +333,9 @@ def get_leaders(company_id: int, db_path: str | None = None) -> list[dict]:
         rows = conn.execute(
             f"""SELECT id AS person_id, name, aliases, title, department, seniority,
                        source_url, COALESCE(source_urls, source_url) AS source_urls,
-                       evidence, as_of, COALESCE(conflict, '') AS conflict
+                       evidence, as_of, COALESCE(conflict, '') AS conflict,
+                       COALESCE(location, '') AS location,
+                       COALESCE(profile_url, '') AS profile_url, COALESCE(bio, '') AS bio
                 FROM leaders WHERE company_id = ? ORDER BY {order}, name""",
             (company_id,),
         ).fetchall()

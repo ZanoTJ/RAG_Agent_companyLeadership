@@ -608,6 +608,10 @@ def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> tuple[dict 
         date_ = max(best["date"], precise["date"])
         best = precise
     active.sort(key=lambda r: r is not best)
+    # Profile fields: from tier-1 sources first, then the newest.
+    by_trust = sorted(active, key=lambda r: (r["tier"], tuple(-x for x in r["date"])))
+    profile = {f: next((r[f] for r in by_trust if r.get(f)), "")
+               for f in ("location", "profile_url", "bio")}
 
     # A current non-leadership job title in an equally new or newer source
     # (e.g. profile headline "Solution Consultant" vs. "Head of ...") is a discrepancy.
@@ -676,6 +680,7 @@ def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> tuple[dict 
             [r["source_url"] for r in active] + [u for r in active
                                                  for u in r.get("extra_sources") or []])),
         "evidence": best.get("evidence") or "",
+        **profile,
         "roles": roles,
         "ended": ended,
         # internal, used by resolve_people and stripped from the result

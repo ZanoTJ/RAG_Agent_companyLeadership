@@ -71,6 +71,7 @@ with st.expander(f"Leadership ({len(leaders)} people)", expanded=not leaders or 
             pd.DataFrame(views.people_rows(leaders), columns=views.PEOPLE_COLUMNS),
             column_config={
                 "Source": st.column_config.LinkColumn("Source"),
+                "Profile": st.column_config.LinkColumn("Profile"),
                 "More sources": st.column_config.ListColumn("More sources"),
             },
             hide_index=True,
