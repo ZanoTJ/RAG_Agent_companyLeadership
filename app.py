@@ -4,7 +4,6 @@ import pandas as pd
 import streamlit as st
 
 import database as db
-import entities
 import rag
 import views
 
@@ -62,10 +61,6 @@ company = db.get_company(company_id)
 with st.expander(f"Leadership ({len(leaders)} people)", expanded=not leaders or len(leaders) < 15):
     st.caption("Collected from public sources (company website, filings, news, public "
                "profiles). The list may not include every leader.")
-    if company.get("removed_unverified"):
-        st.info(f"{company['removed_unverified']} previously listed people were removed "
-                "because their only evidence came from unverified sources. Collect the "
-                "company again to look for official sources.")
     if leaders:
         st.dataframe(
             pd.DataFrame(views.people_rows(leaders), columns=views.PEOPLE_COLUMNS),
@@ -79,7 +74,6 @@ with st.expander(f"Leadership ({len(leaders)} people)", expanded=not leaders or 
         )
         for note in views.disagreements(leaders):
             st.warning(f"Unresolved: {note}")
-        roles = db.get_role_history(company_id)
     else:
         st.warning(
             "No leaders found. The site may render its team page with JavaScript, "

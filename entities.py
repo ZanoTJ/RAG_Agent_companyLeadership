@@ -204,7 +204,6 @@ _ARTICLE_PATH = re.compile(
     r"/(blog|news|newsroom|press|press-releases?|articles?|posts?|stories|insights|"
     r"announcements?|media)(/|$)", re.I)
 TIER_LABEL = {1: "Official / filing", 2: "News / reference / profile"}
-RESOLUTION_VERSION = 4  # bump when resolution logic changes; stored data is re-resolved
 OFFICIAL_TYPES = {"official", "regulatory"}
 
 # ---------------------------------------------------------------- leadership level
@@ -424,9 +423,8 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
     """Group per-source records into unique people (see module docstring).
 
     Records may carry `status` ("current"/"former"/"unknown", from extraction; used
-    only here, never stored), `source_type` (from source evaluation), `person_id`
-    (existing DB id - the merged person keeps the lowest), `aliases`, and
-    `extra_sources` (supporting URLs without a title). `stats` gets
+    only here, never stored), `source_type` (from source evaluation) and `aliases`.
+    `stats` gets
     checked/merged/failed/excluded_former counts and `excluded`: one
     {name, title, reason} entry per excluded person."""
     stats = stats if stats is not None else {}
@@ -657,16 +655,7 @@ def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> tuple[dict 
             "source_type": r.get("source_type") or "",
             "evidence": r.get("evidence") or "", "is_current_title": r is best,
         })
-    # Evidence that a role ended is kept (hidden) so re-checking stored data later
-    # still cancels the older claims; it is never shown as a role.
-    ended = [{"name": r["name"], "title": r["title"],
-              "as_of": format_date(parse_date(r.get("as_of"))),
-              "source_url": r["source_url"], "source_tier": r["tier"],
-              "source_type": r.get("source_type") or "", "evidence": r.get("evidence") or ""}
-             for r in formers if r["date"] != (0, 0, 0)]
-
     return {
-        "id": min((r["person_id"] for r in recs if r.get("person_id")), default=None),
         "name": canonical,
         "aliases": sorted(n for n in all_names if n != canonical),
         "title": best["title"],
@@ -676,13 +665,10 @@ def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> tuple[dict 
             (r["department"] for r in active if r.get("department")), ""),
         "seniority": best["level"],
         "source_url": best["source_url"],
-        "source_urls": list(dict.fromkeys(
-            [r["source_url"] for r in active] + [u for r in active
-                                                 for u in r.get("extra_sources") or []])),
+        "source_urls": list(dict.fromkeys(r["source_url"] for r in active)),
         "evidence": best.get("evidence") or "",
         **profile,
         "roles": roles,
-        "ended": ended,
         # internal, used by resolve_people and stripped from the result
         "_date": date_,
         "_newest": max(r["date"] for r in active),

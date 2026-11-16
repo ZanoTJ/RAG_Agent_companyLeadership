@@ -1,15 +1,9 @@
 """User-facing table rows. Internal fields (person IDs, dates, source tiers) are
 used for logic but never shown."""
 
-import json
-from collections import Counter
-
-import source_policy
-
 SENIORITY_DISPLAY = {"executive": "C-level", "vp": "VP", "department_head": "Department head"}
 PEOPLE_COLUMNS = ["Name", "Also known as", "Title", "As Of", "Department", "Seniority",
                   "Location", "Profile", "Bio", "Source", "More sources"]
-EVIDENCE_COLUMNS = ["Name", "Title", "Source type", "Source", "Evidence"]
 
 
 def people_rows(leaders: list[dict]) -> list[dict]:

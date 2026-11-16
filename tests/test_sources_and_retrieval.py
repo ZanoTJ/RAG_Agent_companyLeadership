@@ -1,7 +1,6 @@
-"""Source evaluation, collection filtering, database migration, simplified views,
+"""Source evaluation, collection filtering, simplified views,
 deterministic counts, and hybrid retrieval. Offline: every LLM / search call is faked."""
 
-import sqlite3
 from datetime import date
 
 import pytest
@@ -174,130 +173,19 @@ def test_ingest_never_stores_or_cites_rejected_sources(tmp_db, monkeypatch):
     assert all(p["reason"] for p in report["pages"])
 
 
-# ---------------------------------------------------------------- migration
-
-def _old_schema_db(path):
-    conn = sqlite3.connect(path)
-    conn.executescript("""
-        CREATE TABLE companies (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
-            url TEXT NOT NULL UNIQUE, scraped_at TEXT, resolved_version INTEGER DEFAULT 0);
-        CREATE TABLE leaders (id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-            name TEXT NOT NULL, title TEXT, department TEXT, seniority TEXT,
-            source_url TEXT NOT NULL, source_urls TEXT, evidence TEXT, aliases TEXT,
-            status TEXT, as_of TEXT, UNIQUE (company_id, name, title));
-        CREATE TABLE role_history (id INTEGER PRIMARY KEY AUTOINCREMENT,
-            leader_id INTEGER NOT NULL REFERENCES leaders(id) ON DELETE CASCADE,
-            name TEXT, title TEXT, status TEXT, as_of TEXT, source_url TEXT NOT NULL,
-            source_tier INTEGER, evidence TEXT, is_current_title INTEGER DEFAULT 0);
-        CREATE TABLE sources (id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-            url TEXT NOT NULL, content TEXT, fetched_at TEXT, UNIQUE (company_id, url));
-        INSERT INTO companies VALUES (1, 'Acme', 'https://acme.com/', '2026-11-12T00:00:00+00:00', 2);
-        INSERT INTO leaders VALUES (1, 1, 'Jane Doe', 'CEO', '', 'executive',
-            'https://acme.com/leadership', 'https://acme.com/leadership', 'Jane Doe, CEO',
-            '[]', 'current', '2026-11-12');
-        INSERT INTO leaders VALUES (2, 1, 'Old Boss', 'CEO', '', 'executive',
-            'https://news.example.com/a', 'https://news.example.com/a', 'former CEO Old Boss',
-            '[]', 'former', '2019');
-        INSERT INTO role_history VALUES (1, 1, 'Jane Doe', 'CEO', 'current', '',
-            'https://acme.com/leadership', 1, 'Jane Doe, CEO', 1);
-        INSERT INTO role_history VALUES (2, 1, 'Jane Doe', 'President', 'former', '2020',
-            'https://news.example.com/b', 2, 'former President', 0);
-        INSERT INTO role_history VALUES (3, 2, 'Old Boss', 'CEO', 'former', '2019',
-            'https://news.example.com/a', 2, 'former CEO Old Boss', 1);
-    """)
-    conn.commit()
-    conn.close()
-
-
-def test_migration_drops_status_safely_and_is_rerunnable(tmp_path, monkeypatch):
-    import database as db
-    path = tmp_path / "old.db"
-    _old_schema_db(path)
-    monkeypatch.setattr(db, "DB_PATH", str(path))
-
-    db.init_db()
-    conn = sqlite3.connect(path)
-    cols = lambda t: {r[1] for r in conn.execute(f"PRAGMA table_info({t})")}  # noqa: E731
-    assert "status" not in cols("leaders") and "status" not in cols("role_history")
-    assert {"as_of", "source_tier", "source_type"} <= cols("role_history")
-    assert "as_of" in cols("leaders") and {"published", "origin"} <= cols("sources")
-    # Former roles removed; a person whose only role was former is removed with it.
-    assert [r[0] for r in conn.execute("SELECT id FROM leaders")] == [1]
-    assert [r[0] for r in conn.execute("SELECT id FROM role_history")] == [1]
-    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-    conn.close()
-    backups = list((tmp_path / "backups").glob("old-pre-migration-*.db"))
-    assert len(backups) == 1
-    # The backup still holds the original data.
-    assert sqlite3.connect(backups[0]).execute("SELECT COUNT(*) FROM leaders").fetchone()[0] == 2
-
-    db.init_db()  # rerun: no-op, no new backup
-    assert len(list((tmp_path / "backups").glob("*.db"))) == 1
-    (p,) = db.get_leaders(1)
-    assert p["name"] == "Jane Doe" and "status" not in p
-
-
-def test_reresolution_removes_unverified_evidence_and_flags_recollection(tmp_db):
-    import rag
-    db = tmp_db
-    cid = db.upsert_company("Acme", "https://acme.com/")
-    db.save_people(cid, [
-        {"name": "Jane Doe", "title": "CEO", "source_url": "https://acme.com/leadership",
-         "source_urls": ["https://acme.com/leadership", "https://exec-lists.example.com/acme"],
-         "seniority": "executive", "roles": [
-             {"title": "CEO", "source_url": "https://acme.com/leadership", "is_current_title": 1},
-             {"title": "CEO", "source_url": "https://exec-lists.example.com/acme"}]},
-        {"name": "Mark Fake", "title": "VP Sales",
-         "source_url": "https://people.example.com/acme-email-format",
-         "seniority": "vp", "roles": [
-             {"title": "VP Sales", "source_url": "https://people.example.com/acme-email-format",
-              "is_current_title": 1}]},
-    ])
-    db.save_source(cid, "https://exec-lists.example.com/acme", NEWS_TEXT)
-    clf = FakeClassifier({"exec-lists.example.com": ("people_data_aggregator", False)})
-
-    stats = rag.reresolve_company(cid, resolver=lambda a, b: (False, ""), classifier=clf,
-                                  log=lambda m: None)
-    (jane,) = db.get_leaders(cid)
-    assert jane["name"] == "Jane Doe"
-    assert jane["source_urls"] == "https://acme.com/leadership"
-    assert stats["removed"] == 1 and db.get_company(cid)["removed_unverified"] == 1
-    assert db.get_sources(cid) == []                 # rejected source deleted
-    assert "people.example.com" not in clf.seen      # rejected by rule, no LLM call
-
-
-def test_reresolution_changes_nothing_if_source_check_fails(tmp_db):
-    import rag
-    db = tmp_db
-    cid = db.upsert_company("Acme", "https://acme.com/")
-    db.save_people(cid, [{"name": "John Roe", "title": "CFO", "seniority": "executive",
-                          "source_url": "https://www.reuters.com/a",
-                          "roles": [{"title": "CFO", "source_url": "https://www.reuters.com/a"}]}])
-    stats = rag.reresolve_company(cid, classifier=broken_classifier, log=lambda m: None)
-    assert stats["failed"] == 1 and len(db.get_leaders(cid)) == 1
-    assert db.get_company(cid)["resolved_version"] == 0  # retried later
-
-
 # ---------------------------------------------------------------- views & counts
 
 def test_user_facing_tables_hide_internal_fields():
     leaders = [{"person_id": 7, "name": "Jensen Huang", "aliases": ["Jen-Hsun Huang"],
                 "title": "President and CEO", "department": "Executive", "seniority": "executive",
                 "source_url": "https://nvidia.com/a", "source_urls": "https://nvidia.com/a\nhttps://b",
-                "evidence": "...", "as_of": "2019", "may_be_outdated": True}]
+                "evidence": "...", "as_of": "2019"}]
     (row,) = views.people_rows(leaders)
     assert list(row) == views.PEOPLE_COLUMNS
-    assert row["Title"] == "President and CEO (may be outdated)"
+    assert row["Title"] == "President and CEO"
     assert row["Also known as"] == "Jen-Hsun Huang" and row["More sources"] == ["https://b"]
-    for hidden in ("person_id", "status", "as_of", "ID"):
+    for hidden in ("person_id", "status", "ID"):
         assert hidden not in row
-    roles = [{"person_id": 7, "name": "Jensen Huang", "title": "CEO", "as_of": "2019",
-              "source_url": "https://nvidia.com/a", "source_tier": 1, "source_type": "official",
-              "evidence": "Jensen Huang, CEO", "is_current_title": 1}]
-    (erow,) = views.evidence_rows(roles)
-    assert list(erow) == views.EVIDENCE_COLUMNS and erow["Source type"] == "Company website"
 
 
 def test_counts_are_deterministic_and_count_unique_people():

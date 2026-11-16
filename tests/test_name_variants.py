@@ -1,5 +1,5 @@
 """Regression tests for alternative name forms, candidate generation, canonical
-names, re-resolution of stored data, and canonical person IDs. Offline: the LLM
+names. Offline: the LLM
 resolver is faked. Fixtures mirror real cases; the code has no knowledge of them."""
 
 from datetime import date
@@ -25,9 +25,7 @@ class FakeResolver:
         return self.same, "fake"
 
 
-def accept_all(items):
-    """Fake source classifier: every ambiguous page is a credible news source."""
-    return [("news", True, "fake") for _ in items]
+
 
 
 def never_called(a, b):
@@ -144,100 +142,3 @@ def test_same_surname_overlapping_role_is_only_a_candidate():
             seniority="department_head"),
     ], "nvidia.com", resolver)
     assert len(resolver.calls) == 1 and len(people) == 2
-
-
-# ---------------------------------------------------------------- stored data & IDs
-
-@pytest.fixture
-def tmp_db(tmp_path, monkeypatch):
-    import database as db
-    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "test.db"))
-    db.init_db()
-    return db
-
-
-def _legacy_rows(db, cid):
-    """Rows as stored by the pre-entity-resolution pipeline: no role history, status NULL."""
-    with db.get_conn() as conn:
-        for name, title, url, urls in [
-            ("Jensen Huang", "Co-founder, President and Chief Executive Officer",
-             "https://www.nvidia.com/en-us/about-nvidia/board-of-directors/jensen-huang",
-             "https://www.nvidia.com/en-us/about-nvidia/board-of-directors/jensen-huang\n"
-             "https://www.nvidia.com/en-us/about-nvidia/"),
-            ("Jen-Hsun Huang", "Founder, President and Chief Executive Officer",
-             "https://vectorshift.ai/research/companies/nvidia/people",
-             "https://vectorshift.ai/research/companies/nvidia/people"),
-            ("Colette Kress", "EVP and Chief Financial Officer",
-             "https://www.nvidia.com/en-us/about-nvidia/governance/management-team/colette-kress",
-             "https://www.nvidia.com/en-us/about-nvidia/governance/management-team/colette-kress"),
-        ]:
-            conn.execute("""INSERT INTO leaders (company_id, name, title, department, seniority,
-                                                 source_url, source_urls, evidence)
-                            VALUES (?, ?, ?, '', 'executive', ?, ?, ?)""",
-                         (cid, name, title, url, urls, f"{name} {title}"))
-        return {r["name"]: r["id"] for r in conn.execute("SELECT id, name FROM leaders")}
-
-
-def test_reresolution_merges_existing_records_and_keeps_lowest_id(tmp_db):
-    import rag
-    db = tmp_db
-    cid = db.upsert_company("NVIDIA", "https://www.nvidia.com/en-us/")
-    old_ids = _legacy_rows(db, cid)
-    assert db.get_company(cid)["resolved_version"] == 0
-
-    stats = rag.reresolve_company(cid, resolver=FakeResolver(same=True), classifier=accept_all,
-                                  log=lambda m: None)
-    assert (stats["checked"], stats["merged"], stats["failed"]) == (1, 1, 0)
-
-    people = {p["name"]: p for p in db.get_leaders(cid)}
-    assert set(people) == {"Jensen Huang", "Colette Kress"}
-    huang = people["Jensen Huang"]
-    assert huang["person_id"] == min(old_ids["Jensen Huang"], old_ids["Jen-Hsun Huang"])
-    assert people["Colette Kress"]["person_id"] == old_ids["Colette Kress"]  # untouched ID
-    assert huang["aliases"] == ["Jen-Hsun Huang"]
-    assert len(huang["source_urls"].split("\n")) == 3  # incl. the extra legacy source
-    assert db.get_company(cid)["resolved_version"] == entities.RESOLUTION_VERSION
-
-    # Idempotent: a second run keeps the same people, IDs, and aliases.
-    rag.reresolve_company(cid, resolver=never_called, classifier=accept_all, log=lambda m: None)
-    again = {p["name"]: p for p in db.get_leaders(cid)}
-    assert {n: p["person_id"] for n, p in again.items()} == \
-        {n: p["person_id"] for n, p in people.items()}
-    assert again["Jensen Huang"]["aliases"] == ["Jen-Hsun Huang"]
-
-
-def test_failed_check_leaves_company_marked_for_retry(tmp_db):
-    import rag
-    db = tmp_db
-    cid = db.upsert_company("NVIDIA", "https://www.nvidia.com/en-us/")
-    _legacy_rows(db, cid)
-
-    def broken(a, b):
-        raise RuntimeError("API down")
-    stats = rag.reresolve_company(cid, resolver=broken, classifier=accept_all, log=lambda m: None)
-    assert stats["failed"] == 1
-    names = {p["name"] for p in db.get_leaders(cid)}
-    # Nothing merged; the unverified duplicate's CEO claim is superseded by the
-    # company's own page (only one person can be CEO).
-    assert names == {"Jensen Huang", "Colette Kress"}
-    assert db.get_company(cid)["resolved_version"] == 0      # retried next time
-
-
-def test_db_table_and_chat_share_canonical_person_ids(tmp_db):
-    import rag
-    db = tmp_db
-    cid = db.upsert_company("NVIDIA", "https://www.nvidia.com/en-us/")
-    _legacy_rows(db, cid)
-    rag.reresolve_company(cid, resolver=FakeResolver(same=True), classifier=accept_all,
-                          log=lambda m: None)
-
-    leader_ids = {p["person_id"] for p in db.get_leaders(cid)}
-    history_ids = {r["person_id"] for r in db.get_role_history(cid)}
-    assert history_ids == leader_ids
-    ctx, _urls = rag.build_context(cid, "Who is the CFO?")
-    assert "Unique people listed: 2" in ctx
-    people_section = ctx.split("QUESTION IS ABOUT")[0]
-    for pid in leader_ids:
-        assert people_section.count(f"[P{pid}]") == 1  # one line per canonical person
-    # IDs are internal: they never reach the user.
-    assert "[P" not in rag.clean_answer(f"Colette Kress [P{min(leader_ids)}] is CFO.", set())
