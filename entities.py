@@ -291,8 +291,12 @@ _SINGLE_ROLE_LONG = {
     "general counsel": "general counsel",
 }
 _SINGLE_ROLES = set(_SINGLE_ROLE_LONG.values())
+# Words that may accompany a one-person role without scoping it ("CEO & Managing
+# Partner" is still a CEO claim; "COO, Robinhood Financial" is scoped).
 _TITLE_FILLER = {"founder", "co founder", "cofounder", "chairman", "chair", "chairwoman",
-                 "chairperson", "president", "svp", "evp", "chairman of the board", ""}
+                 "chairperson", "president", "svp", "evp", "chairman of the board",
+                 "partner", "managing partner", "managing director", "director",
+                 "secretary", "corporate secretary", "treasurer", ""}
 
 
 def single_holder_roles(title: str) -> set[str]:

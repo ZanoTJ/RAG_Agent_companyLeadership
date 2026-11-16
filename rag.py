@@ -209,6 +209,10 @@ Rules:
   names: a different full name (e.g. "{company} Interactive", "{company} Labs"), a
   different website, or a different industry/product means same_company=false.
   If same_company is false or you are unsure, set it to false and return an empty list.
+- A person's own profile (e.g. LinkedIn) usually shows only the employer's name. It is
+  the same company only if the profile also matches the website above or what the
+  company does (its domain, product, or industry). A slightly different employer name
+  (e.g. "{company} AI" vs "{company}") with no matching detail means same_company=false.
 - Exclude people at other companies.
 - status: "current" if the page presents the role as held at the time of writing;
   "former" if the page says the person no longer holds it ("former", "ex-",
