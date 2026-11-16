@@ -157,15 +157,23 @@ def init_db(db_path: str | None = None) -> None:
 
 # ---------------------------------------------------------------- companies
 
-def upsert_company(name: str, url: str, db_path: str | None = None) -> int:
+def save_collection(name: str, url: str, people: list[dict], sources: list[dict],
+                    report: dict, db_path: str | None = None) -> int:
+    """Replace a company's people, sources and search cache with a new collection in
+    ONE transaction: if anything fails, the previous data stays untouched.
+    `scraped_at` is set only here, i.e. only when the write succeeds."""
     with get_conn(db_path) as conn:
-        conn.execute(
-            """INSERT INTO companies (name, url, scraped_at) VALUES (?, ?, ?)
-               ON CONFLICT(url) DO UPDATE SET name = excluded.name,
-                                              scraped_at = excluded.scraped_at""",
-            (name, url, _now()),
-        )
-        return conn.execute("SELECT id FROM companies WHERE url = ?", (url,)).fetchone()["id"]
+        conn.execute("""INSERT INTO companies (name, url) VALUES (?, ?)
+                        ON CONFLICT(url) DO UPDATE SET name = excluded.name""", (name, url))
+        cid = conn.execute("SELECT id FROM companies WHERE url = ?", (url,)).fetchone()["id"]
+        for table in ("leaders", "sources", "search_cache"):
+            conn.execute(f"DELETE FROM {table} WHERE company_id = ?", (cid,))
+        report["people"] = _insert_people(conn, cid, people)
+        conn.executemany(_SOURCE_SQL, [(cid, s["url"], s["content"], _now(), s.get("source_type", ""),
+                                        s.get("published") or "", "collect") for s in sources])
+        conn.execute("UPDATE companies SET scraped_at = ?, collection_report = ? WHERE id = ?",
+                     (_now(), json.dumps(report), cid))
+    return cid
 
 
 def get_company(company_id: int, db_path: str | None = None) -> dict | None:
@@ -202,30 +210,22 @@ def list_companies(db_path: str | None = None) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def clear_company_data(company_id: int, db_path: str | None = None) -> None:
-    """Remove previous results so a re-collection doesn't leave stale people behind."""
-    with get_conn(db_path) as conn:
-        conn.execute("DELETE FROM leaders WHERE company_id = ?", (company_id,))
-        conn.execute("DELETE FROM sources WHERE company_id = ?", (company_id,))
-        conn.execute("DELETE FROM search_cache WHERE company_id = ?", (company_id,))
-        conn.execute("UPDATE companies SET removed_unverified = 0 WHERE id = ?", (company_id,))
-
-
 # ---------------------------------------------------------------- sources
+
+_SOURCE_SQL = """INSERT INTO sources (company_id, url, content, fetched_at, source_type,
+                                      published, origin)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(company_id, url) DO UPDATE SET
+                     content = excluded.content, fetched_at = excluded.fetched_at,
+                     source_type = excluded.source_type, published = excluded.published"""
+
 
 def save_source(company_id: int, url: str, content: str, source_type: str = "",
                 published: str = "", origin: str = "collect",
                 db_path: str | None = None) -> None:
     with get_conn(db_path) as conn:
-        conn.execute(
-            """INSERT INTO sources (company_id, url, content, fetched_at, source_type,
-                                    published, origin)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(company_id, url) DO UPDATE SET
-                   content = excluded.content, fetched_at = excluded.fetched_at,
-                   source_type = excluded.source_type, published = excluded.published""",
-            (company_id, url, content, _now(), source_type, published or "", origin),
-        )
+        conn.execute(_SOURCE_SQL, (company_id, url, content, _now(), source_type,
+                                   published or "", origin))
 
 
 def get_sources(company_id: int, db_path: str | None = None) -> list[dict]:
@@ -277,39 +277,38 @@ def save_search(company_id: int, cache_key: str, query: str, result_count: int,
 
 # ---------------------------------------------------------------- people
 
-def save_people(company_id: int, people: list[dict], db_path: str | None = None) -> int:
+def _insert_people(conn, company_id: int, people: list[dict]) -> int:
     """Store resolved people (from entities.resolve_people) and their supporting
     evidence. People carrying an `id` keep it. Returns the number stored."""
     stored = 0
-    with get_conn(db_path) as conn:
-        for p in people:
-            if not p.get("name") or not p.get("source_url"):
-                continue
-            cur = conn.execute(
-                """INSERT OR IGNORE INTO leaders
-                   (id, company_id, name, title, department, seniority, source_url,
-                    source_urls, evidence, aliases, as_of, conflict)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (p.get("id"), company_id, p["name"].strip(), (p.get("title") or "").strip(),
-                 (p.get("department") or "").strip(), p.get("seniority") or "other",
-                 p["source_url"], "\n".join(p.get("source_urls") or [p["source_url"]]),
-                 (p.get("evidence") or "").strip(), json.dumps(p.get("aliases") or []),
-                 p.get("as_of") or "", p.get("conflict") or ""),
-            )
-            if not cur.rowcount:
-                continue
-            stored += 1
-            conn.executemany(
-                """INSERT INTO role_history (leader_id, name, title, as_of, source_url,
-                                             source_tier, source_type, evidence,
-                                             is_current_title, ended)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [(cur.lastrowid, r.get("name") or p["name"], r["title"], r.get("as_of") or "",
-                  r["source_url"], r.get("source_tier"), r.get("source_type") or "",
-                  r.get("evidence") or "", int(bool(r.get("is_current_title"))), ended)
-                 for ended, rows in ((0, p.get("roles", [])), (1, p.get("ended", [])))
-                 for r in rows],
-            )
+    for p in people:
+        if not p.get("name") or not p.get("source_url"):
+            continue
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO leaders
+               (id, company_id, name, title, department, seniority, source_url,
+                source_urls, evidence, aliases, as_of, conflict)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (p.get("id"), company_id, p["name"].strip(), (p.get("title") or "").strip(),
+             (p.get("department") or "").strip(), p.get("seniority") or "other",
+             p["source_url"], "\n".join(p.get("source_urls") or [p["source_url"]]),
+             (p.get("evidence") or "").strip(), json.dumps(p.get("aliases") or []),
+             p.get("as_of") or "", p.get("conflict") or ""),
+        )
+        if not cur.rowcount:
+            continue
+        stored += 1
+        conn.executemany(
+            """INSERT INTO role_history (leader_id, name, title, as_of, source_url,
+                                         source_tier, source_type, evidence,
+                                         is_current_title, ended)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(cur.lastrowid, r.get("name") or p["name"], r["title"], r.get("as_of") or "",
+              r["source_url"], r.get("source_tier"), r.get("source_type") or "",
+              r.get("evidence") or "", int(bool(r.get("is_current_title"))), ended)
+             for ended, rows in ((0, p.get("roles", [])), (1, p.get("ended", [])))
+             for r in rows],
+        )
     return stored
 
 

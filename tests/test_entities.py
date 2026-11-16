@@ -274,9 +274,10 @@ def test_chat_context_counts_unique_people_not_records(tmp_path, monkeypatch):
 
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "test.db"))
     db.init_db()
-    cid = db.upsert_company("Robinhood", "https://robinhood.com/")
     people = resolve(GALLAGHER + BHATT, FakeResolver(same=True))
-    assert db.save_people(cid, people) == 2
+    report = {}
+    cid = db.save_collection("Robinhood", "https://robinhood.com/", people, [], report)
+    assert report["people"] == 2
 
     ctx, _urls = rag.build_context(cid, "How many executives are there?")
     assert "Unique people listed: 2" in ctx

@@ -346,17 +346,16 @@ def test_find_people_resolves_names_aliases_and_roles(question, expected):
 @pytest.fixture
 def nvidia(tmp_db):
     db = tmp_db
-    cid = db.upsert_company("NVIDIA", "https://www.nvidia.com/")
-    db.save_people(cid, [{
+    cid = db.save_collection("NVIDIA", "https://www.nvidia.com/", [{
         "name": "Jensen Huang", "aliases": ["Jen-Hsun Huang"], "seniority": "executive",
         "title": "Founder, President and Chief Executive Officer", "as_of": "2026-11-12",
         "source_url": "https://www.nvidia.com/board/jensen-huang",
         "roles": [{"title": "Founder, President and CEO", "is_current_title": 1,
                    "source_url": "https://www.nvidia.com/board/jensen-huang",
-                   "source_type": "official", "evidence": "Jensen Huang founded NVIDIA in 1993"}]}])
-    db.save_source(cid, "https://www.nvidia.com/board/jensen-huang",
-                   "Jensen Huang founded NVIDIA in 1993 and has served as CEO since its inception.",
-                   "official")
+                   "source_type": "official", "evidence": "Jensen Huang founded NVIDIA in 1993"}]}],
+        [{"url": "https://www.nvidia.com/board/jensen-huang", "source_type": "official",
+          "content": "Jensen Huang founded NVIDIA in 1993 and has served as CEO since its inception."}],
+        {})
     return db, cid
 
 

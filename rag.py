@@ -4,7 +4,6 @@ hybrid question answering (SQLite + stored source passages + targeted web search
 import os
 import re
 import threading
-import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
@@ -351,17 +350,19 @@ def _person_terms(p: dict) -> list[str]:
     return [p["name"], *(p.get("aliases") or [])]
 
 
-def _store_passages(company_id: int, accepted: list, people: list[dict]) -> None:
-    """Store accepted sources as passages around the people found (not whole pages).
+def _passages(accepted: list, people: list[dict]) -> list[dict]:
+    """Accepted sources as passages around the people found (not whole pages).
     Official pages with no people keep a short overview (e.g. the homepage)."""
     terms = [t for p in people for t in _person_terms(p)]
+    out = []
     for page, verdict in accepted:
         content = source_policy.relevant_passages(page.text, terms)
         if not content and verdict.source_type == "official":
             content = page.text[:3000]
         if content:
-            db.save_source(company_id, page.url, content, verdict.source_type,
-                           page.published, origin="collect")
+            out.append({"url": page.url, "content": content, "source_type": verdict.source_type,
+                        "published": page.published})
+    return out
 
 
 MAX_CORROBORATE = 10  # targeted searches per collection for weakly supported people
@@ -391,6 +392,7 @@ def _extract_all(name: str, domain: str, context: str, accepted: list, report: d
     """Extract from accepted pages that mention roles (in parallel; log from this thread)."""
     found: list[dict] = []
     candidates = [(p, v) for p, v in accepted if scraper.mentions_roles(p.text)]
+    report["extraction_pages"] += len(candidates)
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {pool.submit(extract_leaders, name, domain, context, p): (p, v)
                    for p, v in candidates}
@@ -474,7 +476,9 @@ def _corroborate(name: str, domain: str, targets: list[dict], seen: set[str],
 def ingest_company(url: str, log=print) -> int:
     """Crawl site + Wikipedia + Tavily search -> source evaluation -> Gemini
     extraction -> entity resolution -> corroboration of weakly supported people ->
-    SQLite, with a collection report of every decision."""
+    SQLite, with a collection report of every decision. Everything runs in memory;
+    the stored data is replaced in one transaction at the end, so a failed run
+    leaves the previous collection untouched."""
     db.init_db()
     try:
         base, name, pages = scraper.crawl_company_site(url, log=log)
@@ -489,7 +493,7 @@ def ingest_company(url: str, log=print) -> int:
     context = (scraper.site_description(pages[0].text) if pages else "") or "(unknown)"
     report = {"input_url": url, "company_url": base, "pages": [], "extracted": 0,
               "rejected_records": [], "excluded_people": [], "corroboration": [],
-              "extraction_failures": []}
+              "extraction_failures": [], "extraction_pages": 0}
     classifier = make_llm_classifier(name, domain)
 
     crawled = list(pages)
@@ -502,11 +506,11 @@ def ingest_company(url: str, log=print) -> int:
                 + _evaluate_pages(found_pages, domain, classifier, "search", report, log))
     log(f"Sources: {len(accepted)} accepted, {len(report['pages']) - len(accepted)} skipped.")
 
-    company_id = db.upsert_company(name, base)
-    db.clear_company_data(company_id)
-
     # 2. Extract from accepted sources only, then resolve entities.
     found = _extract_all(name, domain, context, accepted, report, log)
+    if report["extraction_pages"] and             len(report["extraction_failures"]) == report["extraction_pages"]:
+        raise RuntimeError("Extraction failed for every page (is Gemini reachable?). "
+                           "The previously collected data was kept.")
     resolver = _memo(make_llm_resolver(name, domain))
     stats: dict = {}
     people = entities.resolve_people(found, domain, name, resolver=resolver, log=log,
@@ -524,16 +528,10 @@ def ingest_company(url: str, log=print) -> int:
             people = entities.resolve_people(found, domain, name, resolver=resolver, log=log,
                                              stats=stats)
 
-    # 4. Store people, source passages, and the report.
-    stored = db.save_people(company_id, people)
-    _store_passages(company_id, accepted, people)
+    # 4. Replace the stored people, source passages, and report in one transaction.
     report["excluded_people"] = [{k: e[k] for k in ("name", "title", "reason")}
                                  for e in stats["excluded"]]
-    report["people"] = stored
-    db.set_company_fields(company_id, collection_report=json.dumps(report))
-    if not stats["failed"]:  # otherwise re-resolution retries the failed checks later
-        db.set_resolved_version(company_id, entities.RESOLUTION_VERSION)
-    return company_id
+    return db.save_collection(name, base, people, _passages(accepted, people), report)
 
 # ================================================================ hybrid answering
 
