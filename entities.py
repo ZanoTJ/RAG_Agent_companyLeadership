@@ -258,6 +258,23 @@ def leadership_level(title: str, label: str = "") -> str | None:
     return None
 
 
+# Role words that never appear in a personal name. C-suite abbreviations are listed
+# explicitly rather than via leadership_level/_C_ABBREV, which would also match
+# surnames such as "Cao".
+_ROLE_IN_NAME = re.compile(r"\b(head|chief|officer|president|vp|svp|evp|director|manager|"
+                           r"founder|lead|team|department|general counsel|chair\w*|"
+                           r"ceo|cfo|coo|cto|cmo|cio|ciso|cpo|cro)\b")
+
+
+def looks_like_person_name(name: str, title: str = "") -> bool:
+    """False when a role was written where a person's name belongs, e.g. "Head of Data"
+    from "email the Head of Data at Acme"."""
+    t = _level_text(name)
+    if not t or (title and _norm_title(name) == _norm_title(title)):
+        return False
+    return not _ROLE_IN_NAME.search(t)
+
+
 def _is_other_job(title: str) -> bool:
     """A non-leadership job title ("Solution Consultant"), as opposed to a board,
     founder, or director-level title that can coexist with a leadership role."""
@@ -464,8 +481,9 @@ def resolve_people(records: list[dict], company_domain: str | tuple[str, ...],
     parts_of: dict[str, NameParts] = {}
     for rec in records:
         parts = parse_name(rec.get("name") or "")
-        if not parts or not rec.get("source_url"):
-            continue  # unverifiable (first name / initials only) or unsourced
+        if not parts or not rec.get("source_url") or \
+                not looks_like_person_name(rec["name"], rec.get("title") or ""):
+            continue  # unverifiable (first name / initials only, a role), or unsourced
         if rec.get("source_type") == "people_data_aggregator":
             continue  # never evidence (defensive; such sources are filtered earlier)
         r = dict(rec)

@@ -7,6 +7,7 @@ Two layers, applied before extraction and storage:
    - accept the company's own domain (any subdomain; both the entered domain and
      the one it redirects to) as "official";
    - accept government domains (e.g. sec.gov filings) as "regulatory";
+   - reject job postings on third-party sites (/jobs/, /job/, /careers/, /positions/);
    - reject pages that look like people/contact-data listings (email formats,
      phone numbers, "reveal contact" prompts) - judged by URL and content
      patterns, not by a domain blocklist.
@@ -43,6 +44,7 @@ _LOGIN_URL = re.compile(r"/(login|signin|sign-in|authwall|checkpoint|uas/login)(
 _LOGIN_TEXT = re.compile(
     r"(sign in|log in|login|join now|create (an|your|a free) account) to (see|view|continue|"
     r"access|read)|you must be logged in|please (sign|log) in to", re.I)
+_JOB_URL = re.compile(r"/(jobs?|careers?|positions?)(/|$)", re.I)
 _PEOPLE_DATA_URL = re.compile(
     r"(email[-_]?format|/emails?([-_/]|$)|contact[-_]?info|employee[-_]?directory|"
     r"org[-_]?chart|/contacts([-_/]|$)|phone[-_]?numbers?)", re.I)
@@ -80,6 +82,8 @@ def rule_verdict(url: str, text: str, company_domain: str | tuple[str, ...],
         return Verdict(True, "official", "company's own website", "rule")
     if _host(url).endswith(".gov"):
         return Verdict(True, "regulatory", "government / regulatory source", "rule")
+    if _JOB_URL.search(path):  # third-party job posting (company careers pages pass above)
+        return Verdict(False, "other", "job posting / careers listing", "rule")
     hits = sum(bool(p.search(text)) for p in _PEOPLE_DATA_TEXT)
     if _PEOPLE_DATA_URL.search(url) or hits >= 3:
         return Verdict(False, "people_data_aggregator", "contact/people-data listing", "rule")

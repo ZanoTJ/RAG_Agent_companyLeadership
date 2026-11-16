@@ -115,7 +115,9 @@ For each page choose source_type:
 - people_data_aggregator: a site that compiles people or contact data (emails, phone
   numbers, employee/executive lists, org charts) from other sources, or an SEO page
   listing a company's executives without original reporting
-- other: anything else (unrelated, low quality, login-only, forum, ads)
+- other: anything else (unrelated, low quality, login-only, forum, ads), including job
+  postings, job boards, and careers listings: they are not credible evidence of who
+  holds a role
 
 about_company: true only if the page is about {company} ({domain}) or its people.
 Many organizations share a name: a different full name (e.g. "{company} Interactive",
@@ -200,6 +202,8 @@ functions, and board members. One entry per person per title.
 
 Rules:
 - Only include people explicitly named on the page with a role at this company.
+- name must be a specific person's personal name. If the page mentions a role without
+  naming who holds it ("our Head of Data", "the hiring manager"), skip it.
 - First decide which organization the page describes (organization_on_page) and whether
   it is the same company as the website above (same_company). Many companies share
   names: a different full name (e.g. "{company} Interactive", "{company} Labs"), a
@@ -292,6 +296,8 @@ def extract_leaders(company: str, domain: str, context: str,
     for p in parsed.leaders:
         name, quote = _loose(p.name), _loose(p.evidence)
         reason = ("not an employee or board member" if p.relationship != "employee_or_board"
+                  else "name is a role, not a person"
+                  if not entities.looks_like_person_name(p.name, p.title)
                   else "name not found in page text" if not name or name not in haystack
                   else "quote not found in page text" if not quote or quote not in haystack
                   else "title is not a role" if not scraper.mentions_roles(p.title) else "")
