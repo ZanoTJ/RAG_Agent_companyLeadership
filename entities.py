@@ -428,7 +428,7 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
     (existing DB id - the merged person keeps the lowest), `aliases`, and
     `extra_sources` (supporting URLs without a title). `stats` gets
     checked/merged/failed/excluded_former counts and `excluded`: one
-    {name, title, reason, weak} entry per excluded person (`weak` = no official source)."""
+    {name, title, reason} entry per excluded person."""
     stats = stats if stats is not None else {}
     stats.update(checked=0, merged=0, failed=0, excluded_former=0, excluded=[])
     fetched = (fetched_on or date.today()).timetuple()[:3]
@@ -508,7 +508,7 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
         if reason == REASON_FORMER:
             stats["excluded_former"] += 1
         stats["excluded"].append({"name": recs[0]["name"], "title": recs[0]["title"],
-                                  "reason": reason, "weak": all(r["tier"] > 1 for r in recs)})
+                                  "reason": reason})
         log(f"Excluded {recs[0]['name']}: {reason}")
 
     built: list[tuple[list[dict], dict]] = []
@@ -516,7 +516,7 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
         person, reason = _consolidate(recs, fetched)
         if person is None:
             exclude(recs, reason)
-        elif has_roster and not person["_on_live_page"]:
+        elif has_roster and not person["_tier1"] and _is_stale(person["_newest"], fetched):
             exclude(recs, REASON_NOT_ON_ROSTER)
         else:
             built.append((recs, person))
@@ -563,8 +563,16 @@ def resolve_people(records: list[dict], company_domain: str, company_name: str =
 ROSTER_MIN = 3  # people listed on a live company page for it to count as a roster
 REASON_FORMER = "only former roles"
 REASON_NO_LEADERSHIP = "no qualifying leadership title (board-only, founder-only, or other role)"
-REASON_NOT_ON_ROSTER = ("not on the company's current leadership pages, and no recent "
-                        "evidence of the role")
+REASON_NOT_ON_ROSTER = ("not on the company's current leadership pages, no official source, "
+                        f"and no evidence from the last {STALE_AFTER_DAYS} days")
+
+
+def _is_stale(d: tuple[int, int, int], fetched: tuple[int, int, int]) -> bool:
+    """Undated, or older than STALE_AFTER_DAYS before the fetch date."""
+    if d == (0, 0, 0):
+        return True
+    newest = date(d[0], min(d[1], 12) or 1, min(d[2], 28) or 1)
+    return (date(*fetched) - newest).days > STALE_AFTER_DAYS
 
 
 def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> tuple[dict | None, str]:
@@ -672,6 +680,7 @@ def _consolidate(recs: list[dict], fetched: tuple[int, int, int]) -> tuple[dict 
         "ended": ended,
         # internal, used by resolve_people and stripped from the result
         "_date": date_,
-        "_on_live_page": any(_is_live_company_page(r) for r in active),
+        "_newest": max(r["date"] for r in active),
+        "_tier1": any(r["tier"] == 1 for r in active),
         "_single_roles": single,
     }, ""

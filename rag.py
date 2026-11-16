@@ -427,12 +427,13 @@ def _memo(resolver):
 
 
 def _weakly_supported(people: list[dict], excluded: list[dict], domain: str) -> list[dict]:
-    """People backed by a single non-official source, and people excluded only for
-    lack of recent evidence whose sources are all non-official: worth one more search."""
+    """People backed by a single non-official source, and people excluded by the roster
+    rule (only old or undated non-official evidence): a recent independent source found
+    by one more search can confirm the role is still current."""
     out = [{"name": p["name"], "title": p["title"]} for p in people
            if all(entities.source_tier(u, domain) > 1 for u in p["source_urls"])
            and len({entities.registrable_domain(u) for u in p["source_urls"]}) <= 1]
-    out += [e for e in excluded if e["weak"] and e["reason"] == entities.REASON_NOT_ON_ROSTER]
+    out += [e for e in excluded if e["reason"] == entities.REASON_NOT_ON_ROSTER]
     return out[:MAX_CORROBORATE]
 
 
