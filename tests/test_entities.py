@@ -338,3 +338,39 @@ def test_count_question_uses_counts_and_makes_no_web_search(tmp_path, monkeypatc
     counts = contexts[0].split("\nPEOPLE (")[0]  # the COUNTS block, before the people list
     assert "Vice Presidents (incl. SVPs/EVPs): 2" in counts
     assert searches == [] and not out["searched"]
+
+
+# ---------------------------------------------------------------- role phrases as names
+
+@pytest.mark.parametrize("name,ok", [
+    ("Head of Data", False), ("Chief Executive Officer", False), ("VP Marketing", False),
+    ("Vlad Tenev", True), ("JB Mackenzie", True), ("R. Scott Victoria", True),
+    ("Paul C Nichols", True), ("Lily Cao", True),
+])
+def test_person_name_check(name, ok):
+    assert entities.looks_like_person_name(name) is ok
+
+
+def test_role_phrase_from_a_job_post_is_rejected(monkeypatch):
+    import rag
+    from scraper import Page
+    text = "AI Engineer, Agents. Who to email about it: The Head of Data at Campfire."
+    parsed = rag.LeaderList(organization_on_page="Campfire", same_company=True, page_date="",
+                            leaders=[rag.Leader(
+                                name="Head of Data", title="Head of Data", department="Data",
+                                seniority="department_head", relationship="employee_or_board",
+                                status="current", as_of="",
+                                evidence="The Head of Data at Campfire")])
+    monkeypatch.setattr(rag, "generate", lambda *a, **k: type("R", (), {"parsed": parsed})())
+    people, rejected = rag.extract_leaders("Campfire", "campfire.ai", "",
+                                           Page("https://jobs.example.com/x", text))
+    assert people == []
+    assert [r["reason"] for r in rejected] == ["name is a role, not a person"]
+    # the backstop in resolve_people drops it too
+    assert resolve([rec("Head of Data", "Head of Data", "https://campfire.ai/team")]) == []
+
+
+def test_ceo_with_extra_non_scope_words_is_still_a_ceo_claim():
+    assert "ceo" in entities.single_holder_roles("CEO & Managing Partner")
+    assert "ceo" in entities.single_holder_roles("CEO & Founder")
+    assert entities.single_holder_roles("COO, Robinhood Financial") == set()
