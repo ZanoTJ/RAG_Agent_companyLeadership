@@ -56,6 +56,7 @@ if not company_id:
     st.stop()
 
 leaders = db.get_leaders(company_id)
+st.markdown("**Leadership**")
 with st.expander(f"Leadership ({len(leaders)} people)", expanded=not leaders or len(leaders) < 15):
     st.caption("Collected from public sources (company website, filings, news, public "
                "profiles). The list may not include every leader.")
@@ -63,24 +64,38 @@ with st.expander(f"Leadership ({len(leaders)} people)", expanded=not leaders or 
         st.markdown(views.summary_html(leaders), unsafe_allow_html=True)
         for note in views.disagreements(leaders):
             st.warning(f"Unresolved: {note}")
-        st.markdown("**Person details**")
-        for p in leaders:
-            with st.expander(views.person_label(p)):
-                st.markdown(views.details_html(p), unsafe_allow_html=True)
     else:
         st.warning(
             "No leaders found. The site may render its team page with JavaScript, "
             "block automated requests, or not publish leadership publicly."
         )
+st.markdown("**Person Details**")
+with st.expander(f"Person Details ({len(leaders)} people)", expanded=False):
+    for p in leaders:
+        with st.expander(views.person_label(p)):
+            st.markdown(views.details_html(p), unsafe_allow_html=True)  
 
 st.session_state.setdefault("messages", [])
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if question := st.chat_input("Ask about this company's leadership, e.g. 'Who runs engineering?'"):
+# Placed in st.bottom explicitly: it stays pinned at the bottom, but without the
+# auto-scroll Streamlit adds for a top-level chat input (which jumped the page to the
+# bottom whenever an expander was opened).
+question = st.bottom.chat_input("Ask about this company's leadership, e.g. 'Who runs engineering?'")
+
+# Fixed script (no user or scraped data in it): bring the newest question to the top
+# of the view so the answer below it is read from its start.
+_SCROLL_TO_QUESTION = """<script>setTimeout(() => {
+  const q = [...document.querySelectorAll('[data-testid="stChatMessageAvatarUser"]')].pop();
+  if (q) q.closest('[data-testid="stChatMessage"]').scrollIntoView({behavior: "smooth", block: "start"});
+}, 150);</script>"""
+
+if question:
     with st.chat_message("user"):
         st.markdown(question)
+        st.html(_SCROLL_TO_QUESTION, unsafe_allow_javascript=True)  # show "Thinking..."
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             try:
@@ -88,6 +103,7 @@ if question := st.chat_input("Ask about this company's leadership, e.g. 'Who run
             except Exception as e:
                 reply = f"Error answering question: {e}"
         st.markdown(reply)
+        st.html(_SCROLL_TO_QUESTION, unsafe_allow_javascript=True)  # and the answer
     st.session_state.messages += [
         {"role": "user", "content": question},
         {"role": "assistant", "content": reply},

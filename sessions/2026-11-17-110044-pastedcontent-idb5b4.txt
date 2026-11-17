@@ -2361,7 +2361,7 @@
 
 ● While the collections run, I'll write the question script.
 
-  Read 1 file (ctrl+o to expand)
+  Ran 1 shell command (ctrl+o to expand)
 
 ● The collection is still running. I'll continue once it finishes.
 
@@ -3995,3 +3995,188 @@ code 1
     hasn't run. It was blocked because DB Browser for SQLite had leadership.db
     open. The data you now have came from your own re-collect, so tell me if you
     still want me to delete it, re-collect and re-export the fixtures.
+
+> <ide_selection>The user selected the lines 58 to 76 from c:\OneDrive\OneDrive
+  - California State University, Sacramento\Desktop\Work\Volt\project_Company
+  Leadership RAG Agent\app.py:
+  leaders = db.get_leaders(company_id)
+  st.markdown("Leadership")
+  with st.expander(f"Leadership ({len(leaders)} people)", expanded=not leaders
+  or len(leaders) < 15):
+      st.caption("Collected from public sources (company website, filings,
+  news, public "
+                 "profiles). The list may not include every leader.")
+      if leaders:
+          st.markdown(views.summary_html(leaders), unsafe_allow_html=True)
+          for note in views.disagreements(leaders):
+              st.warning(f"Unresolved: {note}")
+      else:
+          st.warning(
+              "No leaders found. The site may render its team page with
+  JavaScript, "
+              "block automated requests, or not publish leadership publicly."
+          )
+  st.markdown("Person Details")
+  with st.expander(f"Person Details ({len(leaders)} people)", expanded=False):
+      for p in leaders:
+          with st.expander(views.person_label(p)):
+              st.markdown(views.details_html(p), unsafe_allow_html=True)
+
+  This may or may not be related to the current task.</ide_selection>
+
+> I don't want the website jumps to the bottom when I expend the list.
+  ⎿  1 skill available
+
+● I'll look at the current app.py first, then find out what makes Streamlit
+  scroll down.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Streamlit's pinned chat input wraps the page in a scroll-to-bottom container,
+  which makes expanding a list scroll you down. I'm checking where Streamlit
+  sets that flag next. · summary
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Streamlit only flags the chat input as auto-positioned when it's called at the
+  top level, so I'll drop the scroll-to-bottom wrapper and keep the input where
+  it is. Next I'm confirming that st.bottom exists in this version. · summary
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+● Update(app.py)
+  ⎿  Added 5 lines, removed 1 line
+      80      with st.chat_message(msg["role"]):
+      81          st.markdown(msg["content"])
+      82  
+      83 -if question := st.chat_input("Ask about this company's leadersh
+         -ip, e.g. 'Who runs engineering?'"):                            
+      83 +# Placed in st.bottom explicitly: it stays pinned at the bottom
+         +, but without the                                              
+      84 +# auto-scroll Streamlit adds for a top-level chat input (which 
+         +jumped the page to the                                         
+      85 +# bottom whenever an expander was opened).                     
+      86 +question = st.bottom.chat_input("Ask about this company's leade
+         +rship, e.g. 'Who runs engineering?'")                          
+      87 +if question:                                                   
+      88      with st.chat_message("user"):
+      89          st.markdown(question)
+      90      with st.chat_message("assistant"):
+
+● Now I'll check it in the browser. The check: the scroll-to-bottom wrapper is
+  gone, the page doesn't move when an expander opens, and the chat input is
+  still at the bottom.
+
+  Made 1 scratchpad edit +64, ran 2 shell commands (ctrl+o to expand)
+
+● The wrapper is removed and the page stays at the top after each click, with
+  the chat input still pinned 56px up. scrollMax didn't grow after the "Person
+  Details" clicks, so I'm checking the screenshot to see whether those clicks
+  missed. · summary
+
+  Read 1 file (ctrl+o to expand)
+
+● My simulated click missed the "Person Details" header because it sat below the
+  visible area, so the test wasn't real. I'm scrolling each header into view
+  first, then clicking and comparing the positions. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The braces inside that f-string need doubling. Fixing line 21:
+
+  Made 1 scratchpad edit +1 -1, ran 1 shell command (ctrl+o to expand)
+
+● Scrolling now stays put on every click, and the page grows below it. I'm
+  putting the old top-level chat input back to confirm that line was the cause.
+  · summary
+
+● Update(app.py)
+  ⎿  Added 1 line, removed 1 line
+      83  # Placed in st.bottom explicitly: it stays pinned at the bottom
+          , but without the
+      84  # auto-scroll Streamlit adds for a top-level chat input (which 
+          jumped the page to the
+      85  # bottom whenever an expander was opened).
+      86 -question = st.bottom.chat_input("Ask about this company's leade
+         -rship, e.g. 'Who runs engineering?'")                          
+      86 +question = st.chat_input("Ask about this company's leadership, 
+         +e.g. 'Who runs engineering?'")                                 
+      87  if question:
+      88      with st.chat_message("user"):
+      89          st.markdown(question)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The old layout returned nothing, which is expected since its page is built
+  differently, so I'm updating the script to scroll the wrapper element when it
+  exists. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Reproducing your bug with the old line made the page jump to the bottom when
+  opening Leadership and Person Details, so that line was the cause. I'm
+  restoring the fix now. · summary
+
+● Update(app.py)
+  ⎿  Added 1 line, removed 1 line
+      83  # Placed in st.bottom explicitly: it stays pinned at the bottom
+          , but without the
+      84  # auto-scroll Streamlit adds for a top-level chat input (which 
+          jumped the page to the
+      85  # bottom whenever an expander was opened).
+      86 -question = st.chat_input("Ask about this company's leadership, 
+         -e.g. 'Who runs engineering?'")                                 
+      86 +question = st.bottom.chat_input("Ask about this company's leade
+         +rship, e.g. 'Who runs engineering?'")                          
+      87  if question:
+      88      with st.chat_message("user"):
+      89          st.markdown(question)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Fix restored and tests pass. Stopping my test server:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Background command "Start Streamlit app in background" failed with exit code
+127
+
+● The page no longer jumps to the bottom when you open an expander; it stays
+  where you are. I checked this in a headless browser against your current data,
+  and pytest passes (119 tests).
+
+  The cause: it was the chat box, not the expanders. When st.chat_input is
+  called at the top level, Streamlit pins it to the bottom of the page. It also
+  makes the page follow new content downward, which suits a chat but not this
+  page. Opening an expander adds content, so the page followed it to the bottom.
+
+  The fix: one line in app.py. The chat box is now created with
+  st.bottom.chat_input(...). It stays pinned at the bottom exactly as before,
+  but Streamlit no longer adds the follow-to-bottom behaviour. I left a comment
+  explaining why.
+
+  What I checked: I scrolled each expander header into view, recorded the scroll
+  position, clicked it, and compared.
+
+  ┌────────────────────────┬──────────────────────────────┬────────────────┐
+  │    Expander opened     │           Old line           │    New line    │
+  ├────────────────────────┼──────────────────────────────┼────────────────┤
+  │ Robinhood, Leadership  │ jumped from the top to the   │ stays at the   │
+  │                        │ bottom                       │ top            │
+  ├────────────────────────┼──────────────────────────────┼────────────────┤
+  │ Robinhood, Person      │ jumped to the new bottom     │ stays put      │
+  │ Details                │                              │                │
+  ├────────────────────────┼──────────────────────────────┼────────────────┤
+  │ Campfire, Person       │ jumped to the new bottom     │ stays put      │
+  │ Details                │                              │                │
+  └────────────────────────┴──────────────────────────────┴────────────────┘
+
+  The chat box stayed pinned 56px from the bottom of the window in every case.
+
+  Trade-off: after you ask a question, the page will no longer scroll down to
+  the answer by itself. The answer still appears below the leadership section,
+  and the chat box stays at the bottom. If you want it, a small script could
+  scroll to just the newest answer; I haven't added one.
+
+  I haven't committed anything. app.py also has your own uncommitted edits (the
+  "Leadership" and "Person Details" headings and the outer Person Details
+  expander), so tell me if you'd like them committed together.
