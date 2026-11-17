@@ -11,7 +11,7 @@ import re
 SENIORITY_DISPLAY = {"executive": "C-level", "vp": "VP", "department_head": "Department head"}
 # (column, share of the table width): Title gets the most room.
 SUMMARY_COLUMNS = [("Name", 19), ("Title", 34), ("Department", 16), ("Seniority", 14),
-                   ("Location", 17)]
+                   ("May be Outdated", 17)]
 # Table cells break a word only if it can't fit on a line at all; details (long URLs)
 # may break anywhere.
 _WRAP_CELL = "white-space:normal;overflow-wrap:break-word;word-break:normal;"
@@ -37,7 +37,7 @@ def summary_rows(leaders: list[dict]) -> list[dict]:
         "Title": (p.get("title") or "") + (" (sources disagree)" if p.get("conflict") else ""),
         "Department": p.get("department") or "",
         "Seniority": SENIORITY_DISPLAY.get(p.get("seniority"), "Other"),
-        "Location": p.get("location") or "",
+        "May be Outdated": "Yes" if p.get("outdated") else "",
     } for p in leaders]
 
 
@@ -66,7 +66,8 @@ def person_details(p: dict) -> list[tuple[str, str | list[str]]]:
     more = [u for u in (p.get("source_urls") or "").split("\n")
             if u and u != p.get("source_url")]
     fields = [("Bio", p.get("bio")), ("Profile", p.get("profile_url")),
-              ("As Of", p.get("as_of")), ("Source", p.get("source_url")),
+              ("As Of", p.get("as_of")), ("Location", p.get("location")),
+              ("Source", p.get("source_url")),
               ("More sources", more)]
     return [(k, v) for k, v in fields if v]
 

@@ -5,6 +5,7 @@ from datetime import date
 
 import pytest
 
+import database
 import entities
 import source_policy
 import views
@@ -173,15 +174,32 @@ def test_user_facing_tables_hide_internal_fields():
     leaders = [{"person_id": 7, "name": "Jensen Huang", "aliases": ["Jen-Hsun Huang"],
                 "title": "President and CEO", "department": "Executive", "seniority": "executive",
                 "source_url": "https://nvidia.com/a", "source_urls": "https://nvidia.com/a\nhttps://b",
-                "evidence": "...", "as_of": "2019"}]
+                "evidence": "...", "as_of": "2019", "outdated": True,
+                "location": "Santa Clara, CA"}]
     (row,) = views.summary_rows(leaders)
     assert list(row) == [name for name, _ in views.SUMMARY_COLUMNS]
+    assert "Location" not in row
     assert row["Name"] == "Jensen Huang (Jen-Hsun Huang)" and row["Title"] == "President and CEO"
-    details = dict(views.person_details(leaders[0]))
-    assert details == {"As Of": "2019", "Source": "https://nvidia.com/a",
-                       "More sources": ["https://b"]}  # empty Bio/Profile left out
+    assert row["May be Outdated"] == "Yes"
+    assert views.summary_rows([{**leaders[0], "outdated": False}])[0]["May be Outdated"] == ""
+    details = views.person_details(leaders[0])
+    assert [k for k, _ in details] == ["As Of", "Location", "Source", "More sources"]
+    assert dict(details) == {"As Of": "2019", "Location": "Santa Clara, CA",
+                             "Source": "https://nvidia.com/a",
+                             "More sources": ["https://b"]}  # empty Bio/Profile left out
     for hidden in ("person_id", "status", "ID"):
-        assert hidden not in row and hidden not in details
+        assert hidden not in row and hidden not in dict(details)
+
+
+def test_outdated_when_evidence_is_over_a_year_old():
+    today = date(2026, 11, 17)
+    assert database.is_outdated("2025-06-01", today)
+    assert not database.is_outdated("2025-11-20", today)  # under a year
+    assert not database.is_outdated("2025", today)  # could be Dec 2025
+    assert not database.is_outdated("2025-11", today)  # could be Nov 30, 2025
+    assert database.is_outdated("2024", today)
+    assert database.is_outdated("2020-01", today)
+    assert not database.is_outdated("", today)  # no date, no flag
 
 
 def test_views_escape_untrusted_values():

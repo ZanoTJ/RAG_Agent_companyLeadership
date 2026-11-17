@@ -1,11 +1,14 @@
 """SQLite storage: companies, leaders (one row per unique person), the supporting
 evidence for each person's role, source passages, and a web-search cache."""
 
+import calendar
 import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
+
+from entities import parse_date
 
 DB_PATH = str(Path(__file__).parent / "leadership.db")
 
@@ -33,6 +36,7 @@ CREATE TABLE IF NOT EXISTS leaders (
     location    TEXT,           -- professional base (never a home address)
     profile_url TEXT,           -- public profile, e.g. LinkedIn
     bio         TEXT,           -- one short sentence from the sources
+    outdated    INTEGER DEFAULT 0,  -- bool: as_of is more than 1 year before today
     UNIQUE (company_id, name, title)
 );
 
@@ -79,6 +83,23 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+OUTDATED_AFTER_DAYS = 365
+
+
+def is_outdated(as_of: str | None, today: date | None = None) -> bool:
+    """True when `as_of` ('2025', '2025-04' or '2025-04-25') is more than a year
+    before `today`. Undated evidence can't be compared, so it is not flagged.
+    A partial date is read as the latest day it could mean ('2025' -> 2025-12-31),
+    so a person is never flagged on a guess."""
+    y, m, d = parse_date(as_of)
+    if not y:
+        return False
+    m = min(m, 12) or 12
+    last_day = calendar.monthrange(y, m)[1]
+    as_of_date = date(y, m, min(d, last_day) or last_day)
+    return ((today or date.today()) - as_of_date).days > OUTDATED_AFTER_DAYS
+
+
 @contextmanager
 def get_conn(db_path: str | None = None):
     conn = sqlite3.connect(db_path or DB_PATH)
@@ -95,6 +116,21 @@ def init_db(db_path: str | None = None) -> None:
     """Create the tables if they don't exist. Safe to rerun."""
     with get_conn(db_path) as conn:
         conn.executescript(SCHEMA)
+        # Existing databases predate the `outdated` column: add it in place.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(leaders)")}
+        if "outdated" not in cols:
+            conn.execute("ALTER TABLE leaders ADD COLUMN outdated INTEGER DEFAULT 0")
+        _refresh_outdated(conn)
+
+
+def _refresh_outdated(conn, company_id: int | None = None) -> None:
+    """Recompute `outdated` against today's date, since it changes as time passes."""
+    sql = "SELECT id, as_of, outdated FROM leaders"
+    rows = conn.execute(sql + (" WHERE company_id = ?" if company_id is not None else ""),
+                        () if company_id is None else (company_id,)).fetchall()
+    fresh = [(int(is_outdated(r["as_of"])), r["id"], r["outdated"] or 0) for r in rows]
+    changed = [(new, rid) for new, rid, old in fresh if new != old]
+    conn.executemany("UPDATE leaders SET outdated = ? WHERE id = ?", changed)
 
 
 # ---------------------------------------------------------------- companies
@@ -201,14 +237,16 @@ def _insert_people(conn, company_id: int, people: list[dict]) -> int:
         cur = conn.execute(
             """INSERT OR IGNORE INTO leaders
                (company_id, name, title, department, seniority, source_url,
-                source_urls, evidence, aliases, as_of, conflict, location, profile_url, bio)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                source_urls, evidence, aliases, as_of, conflict, location, profile_url, bio,
+                outdated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (company_id, p["name"].strip(), (p.get("title") or "").strip(),
              (p.get("department") or "").strip(), p.get("seniority") or "other",
              p["source_url"], "\n".join(p.get("source_urls") or [p["source_url"]]),
              (p.get("evidence") or "").strip(), json.dumps(p.get("aliases") or []),
              p.get("as_of") or "", p.get("conflict") or "", p.get("location") or "",
-             p.get("profile_url") or "", p.get("bio") or ""),
+             p.get("profile_url") or "", p.get("bio") or "",
+             int(is_outdated(p.get("as_of")))),
         )
         if not cur.rowcount:
             continue
@@ -232,10 +270,12 @@ def get_leaders(company_id: int, db_path: str | None = None) -> list[dict]:
     order = """CASE seniority WHEN 'executive' THEN 0 WHEN 'vp' THEN 1
                WHEN 'department_head' THEN 2 ELSE 3 END"""
     with get_conn(db_path) as conn:
+        _refresh_outdated(conn, company_id)
         rows = conn.execute(
             f"""SELECT id AS person_id, name, aliases, title, department, seniority,
                        source_url, COALESCE(source_urls, source_url) AS source_urls,
-                       evidence, as_of, COALESCE(conflict, '') AS conflict,
+                       evidence, as_of, COALESCE(outdated, 0) AS outdated,
+                       COALESCE(conflict, '') AS conflict,
                        COALESCE(location, '') AS location,
                        COALESCE(profile_url, '') AS profile_url, COALESCE(bio, '') AS bio
                 FROM leaders WHERE company_id = ? ORDER BY {order}, name""",
@@ -245,6 +285,7 @@ def get_leaders(company_id: int, db_path: str | None = None) -> list[dict]:
     for r in rows:
         d = dict(r)
         d["aliases"] = json.loads(d["aliases"]) if d["aliases"] else []
+        d["outdated"] = bool(d["outdated"])
         out.append(d)
     return out
 
