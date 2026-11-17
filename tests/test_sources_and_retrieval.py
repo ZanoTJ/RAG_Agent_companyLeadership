@@ -394,3 +394,86 @@ def test_role_question_returns_all_equally_matching_people():
                         "title": "SVP, Growth and Marketing", "may_be_outdated": False}]
     found = [p["name"] for p in rag.find_people("Who heads marketing?", people, "NVIDIA")]
     assert found == ["Kim Park", "Pat Lee"]  # executive first, but the VP is not dropped
+
+
+# ---------------------------------------------------------------- outdated info in answers
+
+def test_context_tells_the_llm_what_is_outdated(tmp_db):
+    import rag
+    db = tmp_db
+    person = lambda name, title, as_of: {
+        "name": name, "title": title, "seniority": "executive", "as_of": as_of,
+        "source_url": f"https://acme.com/{name.split()[0].lower()}"}
+    cid = db.save_collection("Acme", "https://acme.com/", [
+        person("Jane Doe", "Chief Executive Officer", date.today().isoformat()),
+        person("Old Timer", "Chief Marketing Officer", "2020-08-04"),
+        person("No Date", "Chief Financial Officer", "")], [])
+    context, _ = rag.build_context(cid, "How many rows are outdated? When were they updated?")
+    assert "People marked OUTDATED (newest evidence over a year old): 1" in context
+    assert "People with no evidence date: 1" in context
+    line = lambda name: next(l for l in context.splitlines() if name in l)
+    assert "evidence as of: 2020-08-04 | OUTDATED" in line("Old Timer")
+    assert "OUTDATED" not in line("Jane Doe")
+    assert "evidence as of: unknown" in line("No Date") and "OUTDATED" not in line("No Date")
+
+
+# ---------------------------------------------------------------- other organizations
+
+@pytest.mark.parametrize("org,expected", [
+    ("", True), ("Robinhood", True), ("Robinhood Markets, Inc.", True),
+    ("Robinhood UK", True), ("Robinhood Financial LLC", True),
+    ("Autodesk, Inc.", False), ("Sherwood Media", False), ("TradePMR", False),
+    ("TradePMR by Robinhood", False), ("Bitstamp UK", False), ("Robinhoodie Labs", False),
+])
+def test_org_is_company_keeps_only_company_named_entities(org, expected):
+    assert entities.org_is_company(org, "Robinhood", "robinhood.com") is expected
+
+
+def test_title_organization_finds_legal_names():
+    assert entities.title_organization("Chief Marketing Officer, Autodesk, Inc.") == "Autodesk"
+    assert entities.title_organization("President, Robinhood Financial LLC") == "Robinhood Financial"
+    assert entities.title_organization("Vice President, Brokerage") == ""
+    assert entities.title_organization("SVP and GM, Robinhood Gold") == ""
+
+
+def test_directors_outside_job_is_not_a_role_at_the_company():
+    proxy = "https://www.sec.gov/Archives/edgar/data/1783879/hood-20230428.htm"
+    stats = {}
+    people = entities.resolve_people([
+        {"name": "Dara Treseder", "title": "Chief Marketing Officer, Autodesk, Inc.",
+         "source_url": proxy, "source_type": "regulatory", "status": "current",
+         "as_of": "2023-04-28"},
+        {"name": "Dara Treseder", "title": "Director", "source_url": proxy,
+         "source_type": "regulatory", "status": "current", "as_of": "2023-04-28"},
+        {"name": "Shiv Verma", "title": "Chief Financial Officer", "source_url": proxy,
+         "source_type": "regulatory", "status": "current", "as_of": "2023-04-28"},
+    ], "robinhood.com", "Robinhood", fetched_on=date(2026, 11, 17), stats=stats)
+    assert [p["name"] for p in people] == ["Shiv Verma"]
+    assert [e["name"] for e in stats["excluded"]] == ["Dara Treseder"]  # board-only left
+
+
+def test_separately_branded_subsidiary_roles_are_rejected(monkeypatch):
+    import rag
+    text = ("Joshua Topolsky will serve as the Editor-in-chief and President of Sherwood Media. "
+            "Jordan Sinclair, President of Robinhood UK and General Manager of Bitstamp UK.")
+    lead = lambda name, title, org, quote: rag.Leader(
+        name=name, title=title, department="", seniority="executive",
+        relationship="employee_or_board", organization=org, status="current", as_of="",
+        evidence=quote)
+    parsed = rag.LeaderList(organization_on_page="Robinhood", same_company=True, page_date="",
+                            leaders=[
+        lead("Joshua Topolsky", "Editor-in-chief and President of Sherwood Media",
+             "Sherwood Media", "Editor-in-chief and President of Sherwood Media"),
+        lead("Jordan Sinclair", "President of Robinhood UK", "Robinhood UK",
+             "Jordan Sinclair, President of Robinhood UK"),
+        lead("Jordan Sinclair", "General Manager of Bitstamp UK", "Bitstamp UK",
+             "General Manager of Bitstamp UK"),
+    ])
+    monkeypatch.setattr(rag, "generate", lambda *a, **k: type("R", (), {"parsed": parsed})())
+    people, rejected = rag.extract_leaders("Robinhood", "robinhood.com", "",
+                                           Page("https://robinhood.com/newsroom/x", text))
+    assert [(p["name"], p["title"]) for p in people] == [("Jordan Sinclair", "President of Robinhood UK")]
+    assert [(r["name"], r["reason"]) for r in rejected] == [
+        ("Joshua Topolsky", "role is at Sherwood Media, not Robinhood"),
+        ("Jordan Sinclair", "role is at Bitstamp UK, not Robinhood")]
+    assert "organization" not in people[0]

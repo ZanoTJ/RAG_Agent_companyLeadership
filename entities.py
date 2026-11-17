@@ -403,6 +403,32 @@ def _record_date(r: dict, fetched: tuple[int, int, int]) -> tuple[int, int, int]
     return parse_date(r.get("as_of"))
 
 
+def org_is_company(org: str, company_name: str, domains: str | tuple[str, ...]) -> bool:
+    """True if a role held at `org` is a role at the company: the company itself or one
+    of its own "<Company> X" entities ("Robinhood UK", "Robinhood Financial LLC").
+    An outside employer ("Autodesk, Inc.") or a separately branded subsidiary
+    ("Sherwood Media", "TradePMR by Robinhood") is not. Empty `org` = the company."""
+    o = _norm_title(org)
+    if not o:
+        return True
+    domains = (domains,) if isinstance(domains, str) else domains
+    names = {_norm_title(company_name)} | {registrable_domain(d).split(".")[0] for d in domains}
+    return any(n and (o == n or o.startswith(n + " ")) for n in names)
+
+
+# An organization written with a legal suffix inside a title:
+# "Chief Marketing Officer, Autodesk, Inc." -> "Autodesk".
+_ORG_IN_TITLE = re.compile(
+    r"(?:,|\bof\b|\bat\b|@)\s*([A-Z][\w&'.\- ]*?)[,\s]+"
+    r"(?i:inc|incorporated|llc|ltd|limited|corp|corporation|plc|gmbh|l\.p)\b\.?")
+
+
+def title_organization(title: str) -> str:
+    """The organization a title explicitly names with a legal suffix, else ""."""
+    m = _ORG_IN_TITLE.search(title or "")
+    return m.group(1).strip() if m else ""
+
+
 def _scope_of(title: str, other: str, company: tuple[str, ...]) -> bool:
     """True if `other` is `title` plus a scope other than the company itself:
     'President and COO' -> 'President and COO of TradePMR' (not '... of Robinhood')."""
@@ -490,6 +516,12 @@ def resolve_people(records: list[dict], company_domain: str | tuple[str, ...],
             continue  # unverifiable (first name / initials only, a role), or unsourced
         if rec.get("source_type") == "people_data_aggregator":
             continue  # never evidence (defensive; such sources are filtered earlier)
+        org = title_organization(rec.get("title") or "")
+        if not org_is_company(org, company_name, company):
+            # A director's outside job in a proxy ("CMO, Autodesk, Inc."), or a
+            # separately branded subsidiary: not a role at this company.
+            log(f"Dropped role at {org}: {rec['name']} ({rec.get('title')})")
+            continue
         r = dict(rec)
         r["_own_profile"] = _is_own_profile(r, parts)
         r["name"] = display_name(r["name"])
