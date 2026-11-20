@@ -348,6 +348,92 @@ def test_older_departure_does_not_cancel_a_newer_claim():
     assert p["title"] == "CTO"
 
 
+STALE_PAGE = "https://acme.com/about/leadership"     # undated, still lists the old CFO
+CURRENT_PAGE = "https://investors.acme.com/governance"
+DEPARTURE = "https://news.example.com/acme-cfo-steps-down"
+
+
+def test_dated_departure_beats_old_holder_still_on_a_stale_live_page():
+    stats = {}
+    people = resolve([
+        rec("Old Holder", "Chief Financial Officer", STALE_PAGE),
+        rec("New Holder", "Chief Financial Officer", CURRENT_PAGE),
+        rec("Other Exec", "Chief People Officer", CURRENT_PAGE),
+        rec("Third Exec", "Chief Legal Officer", CURRENT_PAGE),
+        # "Acme CFO Old Holder is stepping down; New Holder to take over as CFO"
+        rec("Old Holder", "CFO", DEPARTURE, status="former", as_of="2025-11-06",
+            source_type="news"),
+    ], domain="acme.com", stats=stats)
+    assert names(people) == ["New Holder", "Other Exec", "Third Exec"]
+    assert all(not p["conflict"] for p in people)
+    assert [e["name"] for e in stats["excluded"]] == ["Old Holder"]
+
+
+def test_dated_filing_on_company_site_does_not_count_as_live_evidence():
+    # A signed 8-K hosted on the investor site (no /news/ in the URL) is a dated
+    # document: it can't keep its signer "current" against today's leadership page.
+    stats = {}
+    people = resolve(_roster(
+        rec("Jason Warnick", "Chief Financial Officer",
+            "https://investors.robinhood.com/static-files/b34e5510", as_of="2024-12-18",
+            page_dated=True)), stats=stats)
+    assert "Jason Warnick" not in names(people)
+    assert all(not p["conflict"] for p in people)
+    assert "superseded" in stats["excluded"][0]["reason"]
+
+
+def test_as_of_is_a_stated_date_unless_a_source_presents_the_role_as_current():
+    (filing,) = resolve([rec("Dana Lee", "Chief Operating Officer",
+                             "https://investors.acme.com/static-files/10k", as_of="2025-02-14",
+                             page_dated=True)], domain="acme.com")
+    assert filing["as_of"] == "2025-02-14"  # not the fetch date
+    (news,) = resolve([rec("Dana Lee", "Chief Operating Officer", "https://news.example.com/x",
+                           as_of="2026-03-01", source_type="news")], domain="acme.com")
+    assert news["as_of"] == "2026-03-01"
+    (live,) = resolve([rec("Dana Lee", "Chief Operating Officer", CURRENT_PAGE)],
+                      domain="acme.com")
+    assert live["as_of"] == FETCHED.isoformat()  # an undated live page presents it as current
+
+
+def test_leader_known_only_from_a_press_release_or_profile_is_kept():
+    roster = "https://campfire.ai/basecamp"
+    people = resolve([
+        rec("John Glasgow", "CEO & Founder", roster),
+        rec("Erik Leavell", "Head of Finance", roster, seniority="department_head"),
+        rec("Brendan Doyle", "Head of Product", roster, seniority="department_head"),
+        # not on the company's pages: a recent appointment release ...
+        rec("Alexandra Roveda", "Vice President of Enterprise",
+            "https://www.usatoday.com/press-release/story/54143/campfire-taps-x",
+            as_of="October 30, 2026", seniority="vp", source_type="news"),
+        # ... and a person's own profile listing the role as current
+        rec("Katrina Queirolo", "VP, Marketing", "https://www.linkedin.com/in/katrina-queirolo",
+            seniority="vp", source_type="professional_profile"),
+    ], domain="campfire.ai")
+    by_name = {p["name"]: p for p in people}
+    assert by_name["Alexandra Roveda"]["seniority"] == "vp"
+    assert by_name["Alexandra Roveda"]["as_of"] == "2026-10-30"
+    assert "Katrina Queirolo" in by_name
+
+
+def test_markdown_links_in_page_text_do_not_break_quote_grounding(monkeypatch):
+    import rag as extraction
+    parsed = extraction.LeaderList(
+        organization_on_page="Robinhood", same_company=True, page_date="Nov. 6, 2025",
+        leaders=[extraction.Leader(
+            name="Jason Warnick", title="CFO", department="Finance", seniority="executive",
+            relationship="employee_or_board", status="former", as_of="",
+            evidence="Robinhood CFO Jason Warnick is stepping down after about seven years "
+                     "in the seat")])
+    fake_gemini(monkeypatch, parsed)
+    people, rejected = extraction.extract_leaders("Robinhood", "robinhood.com", "", Page(
+        "https://www.bankingdive.com/news/robinhood-cfo-steps-down",
+        "![Image 1: logo](https://cdn.example.com/x.png) * Robinhood CFO Jason Warnick is "
+        "stepping down after about [seven years](https://robinhood.com/us/en/newsroom/"
+        "jason-warnick-joins) in the seat."))
+    assert not rejected
+    assert people[0]["status"] == "former" and people[0]["page_dated"] is True
+
+
 def test_departure_keeps_the_persons_other_current_role(tmp_path, monkeypatch):
     import database as db
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "t.db"))

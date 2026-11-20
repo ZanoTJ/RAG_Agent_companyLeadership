@@ -392,13 +392,16 @@ def _record_date(r: dict, fetched: tuple[int, int, int]) -> tuple[int, int, int]
     """Effective date of a record's evidence.
 
     Evidence of the present counts as of the fetch date, even without a stated date:
-    - a live (non-article) page on the company's own site ("on our board since 2021");
+    - a live (non-article) page on the company's own site ("on our board since 2021"),
+      unless the page carries its own publication/filing date (`page_dated`, e.g. an
+      8-K under /static-files/): a dated document is evidence as of that date;
     - a person's own public profile (the only person on that page) that presents the
       role as current, e.g. a LinkedIn position "to present".
     Otherwise use the date the source states, if any."""
     if r.get("status") == "former":
         return parse_date(r.get("as_of"))
-    if _is_live_company_page(r) or (r.get("_own_profile") and r.get("status") == "current"):
+    if (_is_live_company_page(r) and not r.get("page_dated")) or \
+            (r.get("_own_profile") and r.get("status") == "current"):
         return fetched
     return parse_date(r.get("as_of"))
 
@@ -467,15 +470,21 @@ def _supersedes(former: dict, claim: dict) -> bool:
     """A 'former' record (e.g. "previously served as Co-CEO") cancels a current claim
     of the same role when it is newer than that claim, or equally new but from another
     source. Records from one page share its date, so on the same page "formerly VP of
-    Product, now SVP of Product" keeps the SVP claim."""
+    Product, now SVP of Product" keeps the SVP claim.
+
+    A claim dated only by the fetch date (still listed on a page, no date stated) is
+    weaker than a dated statement from another source that the role ended."""
     fa, ca = role_tokens(former["title"]), role_tokens(claim["title"])
     same_role = (_norm_title(former["title"]) == _norm_title(claim["title"])
                  or (fa and fa <= ca)
                  # "Chief Technology Officer" ended -> a "CTO" claim ended too
                  or single_holder_roles(former["title"]) & single_holder_roles(claim["title"]))
-    return bool(same_role) and former["date"] != (0, 0, 0) and (
-        former["date"] > claim["date"]
-        or (former["date"] == claim["date"] and former["source_url"] != claim["source_url"]))
+    if not same_role or former["date"] == (0, 0, 0):
+        return False
+    if claim.get("_undated"):
+        return former["source_url"] != claim["source_url"]
+    return (former["date"] > claim["date"]
+            or (former["date"] == claim["date"] and former["source_url"] != claim["source_url"]))
 
 
 def resolve_people(records: list[dict], company_domain: str | tuple[str, ...],
@@ -533,6 +542,8 @@ def resolve_people(records: list[dict], company_domain: str | tuple[str, ...],
         r["tier"] = source_tier(r["source_url"], company_domain, r.get("source_type", ""))
         r["authority"] = name_authority(r["source_url"], company_domain, r.get("source_type", ""))
         r["date"] = _record_date(r, fetched)
+        # dated by the fetch date only: the source itself states no (or another) date
+        r["_undated"] = r["date"] != (0, 0, 0) and r["date"] != parse_date(r.get("as_of"))
         clusters.setdefault(parts.key, []).append(r)
         parts_of.setdefault(parts.key, parts)
 
