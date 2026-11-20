@@ -45,6 +45,25 @@ NEGATIVE_PATH = re.compile(
     r"docs?|support|help|legal|privacy|terms|login|signup)(/|$)", re.I
 )
 
+# Official blog / newsroom: crawled separately from the leadership-page search, because
+# company posts often announce founders, hires and appointments ("X joins as CFO").
+MAX_BLOG_POSTS = 8
+BLOG_INDEX_PATHS = ["/blog", "/news", "/newsroom", "/press", "/company/blog", "/about/news"]
+_BLOG_SECTION = re.compile(r"^/(?:[\w-]+/)?(blog|news|newsroom|press|press-releases|updates|"
+                           r"announcements|stories)/?$", re.I)
+_BLOG_NOT_POST = re.compile(r"/(category|categories|tags?|authors?|page|topics?|feed|rss)(/|$)",
+                            re.I)
+# Post titles/slugs that tend to name leaders.
+_LEADERSHIP_POST = {
+    "join": 5, "welcom": 5, "appoint": 6, "hire": 4, "named": 4, "promot": 5, "new-": 1,
+    "introduc": 3, "meet": 3, "founder": 5, "ceo": 5, "cfo": 5, "cto": 5, "coo": 5,
+    "chief": 5, "vp": 4, "vice-president": 4, "head-of": 4, "leader": 5, "executive": 5,
+    "board": 4, "advisor": 2, "stealth": 4, "launch": 2, "series": 3, "seed": 2,
+    "funding": 3, "raise": 3, "announc": 2, "team": 2, "our-story": 4, "why-we": 3,
+}
+_DATE_META = ("article:published_time", "og:published_time", "datePublished",
+              "publish_date", "pubdate", "date")
+
 # Used to skip pages that clearly mention no leadership roles (saves LLM calls).
 ROLE_PATTERN = re.compile(
     r"\b(CEO|CFO|CTO|COO|CMO|CIO|CISO|CRO|CPO|Chief|President|Vice President|VP|"
@@ -194,7 +213,110 @@ def crawl_company_site(url: str, log=print) -> tuple[str, str, list[Page]]:
             if u not in visited:
                 candidates[u] = max(candidates.get(u, 0), s)
 
+    pages += crawl_company_blog(base_final, home_html, domain, robots, visited, log=log)
     return base_final, name, pages
+
+
+# ---------------------------------------------------------------- official blog
+
+def _on_site(url: str, domain: str) -> bool:
+    """The company's domain or one of its subdomains (blog.acme.com)."""
+    host = bare_domain(url)
+    return host == domain or host.endswith("." + domain)
+
+
+def _blog_indexes(home_html: str, base: str, domain: str) -> list[str]:
+    """Blog/newsroom index pages: links from the homepage (query strings kept, e.g.
+    /blog?category=&showAll=true lists every post) plus the usual paths."""
+    found = []
+    for a in BeautifulSoup(home_html, "html.parser").find_all("a", href=True):
+        url, _ = urldefrag(urljoin(base, a["href"]))
+        p = urlparse(url)
+        if _on_site(url, domain) and (_BLOG_SECTION.match(p.path or "/")
+                                      or (bare_domain(url) != domain
+                                          and bare_domain(url).split(".")[0] in
+                                          ("blog", "news", "newsroom", "press")
+                                          and p.path in ("", "/"))):
+            found.append(url.rstrip("/"))
+    found += [urljoin(base, path) for path in BLOG_INDEX_PATHS]
+    return list(dict.fromkeys(found))
+
+
+def _blog_post_links(html: str, index_url: str, domain: str) -> dict[str, int]:
+    """Post links on a blog index -> leadership-likelihood score (0 = keep as filler)."""
+    index = urlparse(index_url)
+    section = index.path.rstrip("/")
+    posts: dict[str, int] = {}
+    for a in BeautifulSoup(html, "html.parser").find_all("a", href=True):
+        url, _ = urldefrag(urljoin(index_url, a["href"]))
+        p = urlparse(url)
+        if not _on_site(url, domain) or p.query or SKIP_EXT.search(p.path) \
+                or _BLOG_NOT_POST.search(p.path):
+            continue
+        same_host = p.netloc.lower() == index.netloc.lower()
+        if section and not p.path.lower().startswith(section.lower() + "/"):
+            continue  # not under /blog/
+        if not section and not (same_host and p.path.strip("/")):
+            continue
+        hay = (p.path + " " + a.get_text(" ")).lower().replace(" ", "-")
+        url = url.rstrip("/")
+        posts[url] = max(posts.get(url, 0),
+                         sum(w for kw, w in _LEADERSHIP_POST.items() if kw in hay))
+    return posts
+
+
+def published_date(html: str) -> str:
+    """Publication date from <meta> tags or the first <time datetime>, else ""."""
+    soup = BeautifulSoup(html, "html.parser")
+    for key in _DATE_META:
+        tag = soup.find("meta", attrs={"property": key}) or soup.find(
+            "meta", attrs={"name": key}) or soup.find(attrs={"itemprop": key})
+        val = tag and (tag.get("content") or tag.get("datetime"))
+        if val:
+            return val.strip()[:10]
+    t = soup.find("time", datetime=True)
+    return t["datetime"].strip()[:10] if t else ""
+
+
+def crawl_company_blog(base: str, home_html: str, domain: str, robots=None,
+                       visited: set | None = None, log=print) -> list[Page]:
+    """Posts from the company's official blog/newsroom that mention leadership roles.
+    Posts whose title suggests a leadership announcement are fetched first."""
+    visited = visited if visited is not None else set()
+    posts: dict[str, int] = {}
+    pages: list[Page] = []
+    for index in _blog_indexes(home_html, base, domain):
+        if index.rstrip("/") in visited:
+            continue
+        visited.add(index.rstrip("/"))
+        res = fetch(index, robots)
+        if not res or not _on_site(res[0], domain):
+            continue
+        found = _blog_post_links(res[1], res[0], domain)
+        if found:
+            log(f"Blog index {res[0]}: {len(found)} posts")
+            text = html_to_text(res[1])
+            if mentions_roles(text):  # author bylines: "Jane Doe • Head of Product"
+                pages.append(Page(res[0], text))
+            for u, s in found.items():
+                posts[u] = max(posts.get(u, 0), s)
+    fetched = 0
+    for url in sorted(posts, key=lambda u: -posts[u]):
+        if fetched >= MAX_BLOG_POSTS:
+            break
+        if url in visited:
+            continue
+        visited.add(url)
+        res = fetch(url, robots)
+        if not res or not _on_site(res[0], domain):
+            continue
+        text = html_to_text(res[1])
+        if not mentions_roles(text):
+            continue
+        pages.append(Page(res[0], text, published_date(res[1])))
+        fetched += 1
+        log(f"Fetched blog post {res[0]}")
+    return pages
 
 
 def fetch_wikipedia(company_name: str, company_url: str, log=print) -> Page | None:

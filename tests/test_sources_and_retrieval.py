@@ -113,6 +113,45 @@ def test_crawler_drops_redirects_to_other_sites(monkeypatch):
     assert all("people-data.example.com" not in p.url for p in pages)
 
 
+def test_official_blog_is_accepted_as_official():
+    for url in ("https://campfire.ai/blog?category=&showAll=true",
+                "https://campfire.ai/blog/were-coming-out-of-stealth",
+                "https://blog.campfire.ai/some-post"):
+        v = source_policy.rule_verdict(url, "Campfire blog. " * 50, ("meetcampfire.com", "campfire.ai"))
+        assert v.accepted and v.source_type == "official" and "blog" in v.reason, url
+        assert source_policy.source_label(url, "official", "campfire.ai") == "Company blog"
+    assert source_policy.source_label("https://campfire.ai/about", "official",
+                                      "campfire.ai") == "Company website"
+    # Someone else's blog is not official.
+    assert not source_policy.is_official_blog("https://medium.com/blog/campfire", "campfire.ai")
+
+
+def test_crawler_fetches_leadership_posts_from_official_blog(monkeypatch):
+    import scraper
+    index = "https://campfire.ai/blog?category=&showAll=true"
+    html = {
+        "https://campfire.ai": f'<a href="/blog?category=&showAll=true">Blog</a>',
+        index: ('<a href="/blog/were-coming-out-of-stealth">We are coming out of stealth</a>'
+                '<a href="/blog/category/product">Product</a>'
+                "<p>Brendan Doyle • Head of Product</p>"
+                '<a href="https://other.com/blog/x">x</a>'),
+        "https://campfire.ai/blog/were-coming-out-of-stealth":
+            '<meta property="article:published_time" content="2024-02-27T10:00:00Z">'
+            "<p>John Glasgow, CEO and co-founder of Campfire.</p>",
+    }
+
+    def fake_fetch(url, robots=None):
+        url = url.rstrip("/")
+        return (url, html[url]) if url in html else None
+    monkeypatch.setattr(scraper, "fetch", fake_fetch)
+    monkeypatch.setattr(scraper, "_robots", lambda base: None)
+    _, _, pages = scraper.crawl_company_site("campfire.ai", log=lambda m: None)
+    post = [p for p in pages if p.url.endswith("were-coming-out-of-stealth")]
+    assert post and post[0].published == "2024-02-27"
+    assert any(p.url == index and "Head of Product" in p.text for p in pages)  # bylines kept
+    assert not any("/category/" in p.url or "other.com" in p.url for p in pages)
+
+
 def test_ingest_never_stores_or_cites_rejected_sources(tmp_db, monkeypatch):
     import rag
     import scraper

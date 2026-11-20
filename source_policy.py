@@ -5,7 +5,8 @@ Two layers, applied before extraction and storage:
 1. Deterministic rules (no API calls):
    - reject pages with no readable content or behind a login wall;
    - accept the company's own domain (any subdomain; both the entered domain and
-     the one it redirects to) as "official";
+     the one it redirects to) as "official" - including its official blog /
+     newsroom (acme.com/blog/..., blog.acme.com/...), labeled "Company blog";
    - accept government domains (e.g. sec.gov filings) as "regulatory";
    - reject job postings on third-party sites (/jobs/, /job/, /careers/, /positions/);
    - reject pages that look like people/contact-data listings (email formats,
@@ -38,6 +39,24 @@ SOURCE_LABEL = {
     "official": "Company website", "regulatory": "Regulatory filing", "news": "News",
     "reference": "Reference", "professional_profile": "Public profile",
 }
+# Official blog / newsroom on the company's own domain or a subdomain
+# (acme.com/blog/..., acme.com/blog?category=&showAll=true, blog.acme.com/...).
+_OFFICIAL_BLOG = re.compile(
+    r"^(blog|news|newsroom|press)\.|/(blog|news|newsroom|press|press-releases?|updates|"
+    r"announcements?|stories)(/|\?|$)", re.I)
+
+
+def is_official_blog(url: str, company_domain: str | tuple[str, ...]) -> bool:
+    """A post or index on the company's own blog/newsroom (accepted as "official")."""
+    p = urlparse(url)
+    return is_company_url(url, company_domain) and bool(
+        _OFFICIAL_BLOG.search(p.netloc.lower()) or _OFFICIAL_BLOG.search(p.path))
+
+
+def source_label(url: str, source_type: str, company_domain: str | tuple[str, ...] = ()) -> str:
+    if source_type == "official" and company_domain and is_official_blog(url, company_domain):
+        return "Company blog"
+    return SOURCE_LABEL.get(source_type, "Web page")
 
 MIN_TEXT_CHARS = 200
 _LOGIN_URL = re.compile(r"/(login|signin|sign-in|authwall|checkpoint|uas/login)(/|\?|$)", re.I)
@@ -78,6 +97,8 @@ def rule_verdict(url: str, text: str, company_domain: str | tuple[str, ...],
             return Verdict(False, "other", "no readable public content", "rule")
         if _LOGIN_URL.search(path) or (_LOGIN_TEXT.search(text[:4000]) and len(text) < 4000):
             return Verdict(False, "other", "requires login to read", "rule")
+    if is_official_blog(url, company_domain):
+        return Verdict(True, "official", "company's official blog / newsroom", "rule")
     if is_company_url(url, company_domain):
         return Verdict(True, "official", "company's own website", "rule")
     if _host(url).endswith(".gov"):
