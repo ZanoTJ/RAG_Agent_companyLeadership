@@ -53,8 +53,10 @@ The app always calls the real Gemini API; fakes exist only in `tests/`.
 The agent is deliberately conservative about what it collects and what it treats as fact.
 
 **Only public, trustworthy sources**
-- Accepted: the company's own website (*official*), government filings such as `sec.gov`
-  (*regulatory*), news, reference works such as Wikipedia, and public professional profiles.
+- Accepted: the company's own website (*official*), including its official blog or
+  newsroom (`acme.com/blog/...`, `blog.acme.com`, labelled *Company blog*), government
+  filings such as `sec.gov` (*regulatory*), news, reference works such as Wikipedia, and
+  public professional profiles. A blog on someone else's site (e.g. Medium) is not official.
 - Rejected: pages behind a login wall, pages with no readable content, job postings on
   third-party sites, and people-data / contact-data aggregators (email formats, phone
   numbers, "reveal contact" pages, org-chart sites).
@@ -72,7 +74,9 @@ The agent is deliberately conservative about what it collects and what it treats
   "TradePMR") are dropped, as are outside jobs named in a source (e.g. a board member's
   "CMO, Autodesk, Inc." in a proxy filing). A combined title spanning two organizations is
   split, and only the company's part is kept.
-- Customers, partners, and investors quoted on the company's site are not leaders.
+- Customers, partners, and investors quoted on the company's site are not leaders. Guest
+  authors are ignored, but a byline on the company's own blog ("Jane Doe • Head of
+  Product") counts as evidence of that person's role.
 
 **Only operating leadership**
 - C-level executives, VPs (incl. SVPs/EVPs), and heads of departments. Board members and
@@ -80,21 +84,28 @@ The agent is deliberately conservative about what it collects and what it treats
 - Names must be a specific person's name, not a role, first name, or initials.
 
 **Only facts grounded in the page**
-- The name and a verbatim evidence quote must appear in the page text. Titles are copied
-  as written, never inferred.
+- The name and a verbatim evidence quote must appear in the page text (markdown link
+  syntax in search results is ignored when matching). Titles are copied as written,
+  never inferred.
 - Location (professional base only, never a home address) and profile URL are kept only if
   they appear on the page; otherwise they are left empty.
 - No personal contact data (emails, phone numbers) is collected.
 
 **Dated, with stale information flagged**
 - Each person's *As Of* is the date of their newest supporting source (when the role was
-  last confirmed, not when it started).
+  last confirmed, not when it started). The collection date is used only when a source
+  presents the role as current without a date: an undated live page on the company's site
+  (e.g. its leadership page) or the person's own profile ("to present"). A dated document
+  on the company's site, such as a filing under `investors.acme.com/static-files/...` or a
+  blog post, keeps the date it states.
 - People whose newest evidence is more than a year old are marked **outdated**
   (`OUTDATED_AFTER_DAYS` in `database.py`). The flag is recomputed against today's date
   each time the data is read; undated evidence is never flagged on a guess.
 - Roles that a source says have ended, or that a newer source gives to someone else, are
-  dropped. People supported only by non-official evidence older than 2 years
-  (`STALE_AFTER_DAYS`) are excluded.
+  dropped. A dated statement that a role ended ("CFO X is stepping down") overrides an
+  undated listing of that role, so a stale page can't keep a replaced leader. People
+  supported only by non-official evidence older than 2 years (`STALE_AFTER_DAYS`) are
+  excluded.
 
 ## Architecture
 
@@ -109,9 +120,14 @@ question ──► SQLite people + exact counts ──► stored passages ──
 ```
 
 1. **Collect.** `scraper.py` crawls the company site (robots.txt respected, leadership-like
-   links scored, common paths tried) and fetches the Wikipedia article if it links to the
-   company's domain. `search.py` runs a fixed set of Tavily queries built only from the
-   company name and domain.
+   links scored, common paths tried), then its official blog or newsroom: index pages found
+   on the homepage (query strings kept, e.g. `/blog?category=&showAll=true`) or at common
+   paths, up to 8 posts that mention a role (titles that suggest a hire or appointment come
+   first), each with its publication date, plus the index itself when its bylines carry
+   titles. It also fetches the Wikipedia article if it links to the company's domain.
+   `search.py` runs a fixed set of Tavily queries built only from the company name and
+   domain, including two leadership-change queries without the domain (appointments;
+   departures and successors), because that news rarely ranks for queries that include it.
 2. **Source policy** (`source_policy.py`), before anything is extracted or stored. URL rules
    decide what is *official* (the company's domain, both the entered one and the one it
    redirects to) or *regulatory* (`.gov`); login walls and people-data/contact listings are
@@ -131,7 +147,10 @@ question ──► SQLite people + exact counts ──► stored passages ──
    ("..., Autodesk, Inc.") are dropped as a second, code-level check. Seniority comes from
    the title in code, so counts are deterministic.
    Roles that a source says have ended, or that a newer source gives to someone else (one-person
-   roles like CEO/CTO), are dropped. The company's own spelling becomes the display name.
+   roles like CEO/CTO), are dropped. A record dated only by the collection date (an undated
+   listing) loses to a dated departure from another source, and a dated document on the
+   company's site counts as of its own date, so it can't tie with today's leadership page.
+   The company's own spelling becomes the display name.
 5. **SQLite.** A collection runs entirely in memory, then replaces the company's previous data
    in one transaction. If every extraction fails (e.g. Gemini is down), the previous data is kept.
    Each person row stores an `as_of` date and an `outdated` flag; older databases get the
@@ -167,7 +186,8 @@ question ──► SQLite people + exact counts ──► stored passages ──
   collected. Telling a subsidiary from a company entity relies on the name ("<Company> X"),
   so an entity with an unrelated name is treated as a subsidiary.
 - **JavaScript-rendered sites**: the crawler doesn't run JS, so team pages built client-side
-  yield little text. Tavily often makes up for it.
+  yield little text, and blog indexes that load more posts on scroll ("See More") show
+  only their first page of posts. Tavily often makes up for it.
 - **Old official sources keep people.** Any company-domain or `.gov` source keeps a person, so
   an officer named in an old press release or proxy can remain listed after leaving.
 - **Runs vary.** Tavily results and Gemini judgments change between runs.
@@ -182,6 +202,6 @@ question ──► SQLite people + exact counts ──► stored passages ──
 | `rag.py` | Collection pipeline, Gemini calls, hybrid answering |
 | `entities.py` | Entity resolution, leadership rules, company-vs-subsidiary check, date handling |
 | `source_policy.py` | Source acceptance rules |
-| `scraper.py`, `search.py` | Company-site crawler and Wikipedia, Tavily search |
+| `scraper.py`, `search.py` | Company-site and official-blog crawler, Wikipedia, Tavily search |
 | `database.py`, `views.py` | SQLite schema and queries (incl. the `outdated` flag), HTML tables for the UI |
 | `tests/` | Offline pytest suite |
