@@ -35,6 +35,11 @@ QUERY_TEMPLATES = [
     ('"{name}" {domain} head of engineering product technology', None),
     ('"{name}" {domain} head of marketing sales partnerships', None),
     ('"{name}" {domain} head of finance operations people', None),
+
+    # Leadership changes. No domain token: appointment and departure news rarely
+    # ranks for queries that include it. Namesakes are filtered by source evaluation.
+    ('"{name}" announces appointment of vice president OR chief OR head', None),
+    ('"{name}" steps down OR succeeds OR replaces chief officer', None),
 ]
 RESULTS_PER_QUERY = 5
 RESULTS_RESTRICTED = 10  # site- or domain-restricted queries

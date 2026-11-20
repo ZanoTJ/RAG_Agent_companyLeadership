@@ -279,6 +279,16 @@ def _loose(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", s.lower())).strip()
 
 
+_MD_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+
+
+def _plain(s: str) -> str:
+    """Markdown links reduced to their text, images dropped: search results come as
+    markdown ("after about [seven years](https://...) in the seat"), quotes as prose."""
+    return _MD_LINK.sub(r"\1", _MD_IMAGE.sub(" ", s or ""))
+
+
 def _page_date(parsed_date: str, published: str, fetched: date) -> str:
     """The page's own date (publication/filing), ignoring impossible future dates."""
     for d in (parsed_date, published):
@@ -305,13 +315,16 @@ def extract_leaders(company: str, domain: str, context: str,
 
     # Grounding checks: the name AND the evidence quote must appear in the page text,
     # and the title must name an actual leadership role (not just "engineering").
-    haystack = _loose(page.text)
+    haystack = _loose(_plain(page.text))
     # Evidence date = when the page said it (publication/filing date); a role's start
     # date ("director since 2016") is only a fallback.
     page_date = _page_date(parsed.page_date, page.published, date.today())
+    # A page with its own date (at least year and month, so a "(c) 2026" footer doesn't
+    # count) is a dated document - a filing or post - not a live page.
+    page_dated = entities.parse_date(page_date)[1] > 0
     out, rejected = [], []
     for p in parsed.leaders:
-        name, quote = _loose(p.name), _loose(p.evidence)
+        name, quote = _loose(_plain(p.name)), _loose(_plain(p.evidence))
         org = p.organization.strip() or entities.title_organization(p.title)
         reason = ("not an employee or board member" if p.relationship != "employee_or_board"
                   else f"role is at {org}, not {company}"
@@ -333,6 +346,7 @@ def extract_leaders(company: str, domain: str, context: str,
         if bare and bare not in page.text.lower() and bare not in page.url.lower():
             rec["profile_url"] = ""
         rec["as_of"] = page_date or _page_date(p.as_of, "", date.today())
+        rec["page_dated"] = page_dated
         out.append(rec)
     return out, rejected
 
